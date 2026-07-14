@@ -1,0 +1,65 @@
+{
+  "breakers": [
+    {
+      "name": "eastmoney_spot",
+      "state": "closed",
+      "failure_count": 0,
+      "failure_threshold": 3,
+      "total_calls": 2,
+      "total_failures": 0,
+      "last_error": null,
+      "last_success": "00:23:52",
+      "cooldown_remaining_sec": 0
+    },
+    {
+      "name": "eastmoney_daily",
+      "state": "closed",
+      "failure_count": 0,
+      "failure_threshold": 3,
+      "total_calls": 1,
+      "total_failures": 0,
+      "last_error": null,
+      "last_success": "00:22:54",
+      "cooldown_remaining_sec": 0
+    },
+    {
+      "name": "sina_kline",
+      "state": "closed",
+      "failure_count": 0,
+      "failure_threshold": 5,
+      "total_calls": 0,
+      "total_failures": 0,
+      "last_error": null,
+      "last_success": null,
+      "cooldown_remaining_sec": 0
+    },
+    {
+      "name": "sina_index",
+      "state": "closed",
+      "failure_count": 0,
+      "failure_threshold": 5,
+      "total_calls": 1,
+      "total_failures": 0,
+      "last_error": null,
+      "last_success": "00:23:53",
+      "cooldown_remaining_sec": 0
+    }
+  ],
+  "rate_limits": {
+    "eastmoney_spot": 60.0,
+    "eastmoney_daily": 30.0,
+    "sina_kline": 3.0,
+    "sina_index": 60.0,
+    "update_realtime": 60.0
+  },
+  "cache": {
+    "etf_pool": 1543,
+    "active_etfs": 1543,
+    "kline_cached": 0,
+    "realtime_cached": 1543,
+    "hs300_klines": 5946
+  },
+  "last_realtime_update": "00:23:52",
+  "realtime_update_min_interval_sec": 60.0,
+  "realtime_update_available_in_sec": 11
+}

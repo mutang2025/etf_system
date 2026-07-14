@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+*.so
+.python-version
+
+# Virtual environments
+venv/
+.venv/
+env/
+.env
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project specific
+backend/data/*.db
+backend/logs/*.log
+backend/.env
+
+# Node
+node_modules/
+frontend/node_modules/
+frontend/dist/
+
+# Temp
+*.tmp
+*.temp
+test_output.txt
+create_repo_result.json
