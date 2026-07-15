@@ -8,7 +8,7 @@
 ## 两项优化
 
 ### 1. ETF 白名单小池（Whitelist Small Pool）
-- `config.py`：新增 `USE_WHITELIST_POOL=True` 与 `ETF_WHITELIST`（精选 **36** 只高流动性宽基/行业/跨境/商品 ETF，可编辑）。
+- `config.py`：新增 `USE_WHITELIST_POOL=True` 与 `ETF_WHITELIST`（精选 **100** 只纯 A 股高流动性宽基/行业 ETF，可编辑）。
 - `screening_engine.py`：新增 `get_scan_universe()`，仅当 `DATA_SOURCE=="akshare"` 且启用白名单时，把扫描池收敛为白名单与全市场的交集；为空则回退全池（防误配）。`run_full_screening` 改用它作为 Layer 0 输入。
 - `akshare_data_provider.py`：`_load_etf_pool` 中将白名单代码的 `status` 置为 `whitelist`，使 Layer 1 基础过滤**直通**（不被流动性/市值门槛误杀）。
 - **Mock 模式不受影响**：白名单逻辑仅在 `akshare` 模式生效，mock 测试/演示仍走全池。
@@ -25,24 +25,24 @@
 - `.gitignore` 增加 `backend/data/kline_cache/`（派生缓存不入库）。
 
 ## 验证结果（真实 akshare，端口 8077）
-- `GET /api/universe` → `use_whitelist=true, whitelist_size=36, universe_size=35`（36 只中 35 只命中实时池，1 只未匹配被优雅丢弃），全部 `status=whitelist`。
+- `GET /api/universe` → `use_whitelist=true, whitelist_size=100, universe_size=100`，全部 `status=whitelist`。
 - `POST /api/scanner/force-scan` 触发一次完整扫描：
-  - 日志：`Whitelist pool: 35 ETFs (from 1544 total)` → `Layer 0: 35` → `Layer 1: 35 passed`。
-  - `sina_kline` 熔断器：`total_calls=35, total_failures=0`，**而非 1544**。
-  - `backend/data/kline_cache/` 生成 35 个 `{code}.json` + `_index.json`；`kline_persistent_cached=35`。
+  - 日志：`Whitelist pool: 100 ETFs (from 1544 total)` → `Layer 0: 100` → `Layer 1: 100 passed`。
+  - `sina_kline` 熔断器：`total_calls=100, total_failures=0`，**而非 1544**。
+  - `backend/data/kline_cache/` 生成 100 个 `{code}.json` + `_index.json`；`kline_persistent_cached=100`。
 
 ## 性能收益
 | 指标 | 优化前 | 优化后 |
 |------|--------|--------|
-| 单次选股 K 线网络请求 | ~1544 | **35**（↓约 44×） |
+| 单次选股 K 线网络请求 | ~1544 | **100**（↓约 15×） |
 | 冷启动首扫 | 重拉全市场 | 仅拉白名单（且落盘缓存二次启动≈0 网络） |
-| 守护进程每轮 | 受当日推荐缓存保护，但首扫仍 1544 | 首扫 35 + 落盘缓存 |
+| 守护进程每轮 | 受当日推荐缓存保护，但首扫仍 1544 | 首扫 100 + 落盘缓存 |
 
 ## 测试
 - 新增 `backend/tests/test_whitelist_kline_cache.py`：`get_scan_universe` 在 akshare/mock 两种模式行为、空白名单回退；`PersistentKlineStore` 往返一致、新鲜度判定（跨交易日失效）、空输入安全、周末回退周五。
-- 全量 pytest：32 passed。
+- 全量 pytest 通过（含新增白名单 / K 线缓存用例）。
 
 ## 可调整项
-- 编辑 `config.py` 的 `ETF_WHITELIST` 即可改小池标的（如扩到 50~80 只仍远小于全市场）。
+- 编辑 `config.py` 的 `ETF_WHITELIST` 即可改小池标的（当前 100 只纯 A 股，仍远小于全市场）。
 - 关闭优化：`USE_WHITELIST_POOL=False` 即回退全市场扫描（白名单仍作 Layer1 直通标记，无副作用）。
 - 缓存目录：`config.py` 的 `KLINE_CACHE_DIR`，删除该目录即可强制全量重拉。
