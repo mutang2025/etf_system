@@ -9,6 +9,7 @@ from src.domain.enums import PositionStatus
 from src.indicators.technical import IndicatorCalculator, is_trend_stock
 from src.infrastructure.data_provider_factory import get_data_provider
 from src.infrastructure.database_repo import DatabaseRepository
+from src.trading.sell_strategies import SellStrategyEngine
 from config import settings
 
 
@@ -18,6 +19,9 @@ class PositionManager:
     def __init__(self, db: DatabaseRepository, data_provider=None):
         self.db = db
         self.mock = data_provider or get_data_provider()
+        # 单例卖出引擎：日内峰值/未创新高计数器跨扫描调用累积，
+        # 否则每次调用重建实例会让冲高回落(P70)与强制减仓(P65)永远不触发。
+        self.sell_engine = SellStrategyEngine(self.mock)
 
     def confirm_buy(self, signal_id: str, etf_code: str, etf_name: str,
                     buy_price: float, buy_amount: float,
@@ -146,16 +150,25 @@ class PositionManager:
     def check_holdings_for_sell(self) -> list[dict]:
         """Check all holding positions against sell strategies.
 
-        Returns list of sell signal dicts.
+        Returns list of sell signal dicts. 同一持仓+同一策略的待处理信号会去重，
+        避免守护进程每轮扫描重复落库。
         """
-        from src.trading.sell_strategies import SellStrategyEngine
-        sell_engine = SellStrategyEngine(self.mock)
         positions = self.update_all_positions()
-        sell_signals = []
+        if not positions:
+            return []
 
+        # 组合层面未实现盈亏，用于紧急熔断（PRD 要求整体组合浮亏 > 5%）
+        total_cost = sum(p["buy_amount"] for p in positions) or 0
+        total_value = sum(p["current_value"] for p in positions)
+        portfolio_pnl_pct = (total_value / total_cost - 1) * 100 if total_cost > 0 else 0
+
+        sell_signals = []
         for pos in positions:
-            signal = sell_engine.check_all_strategies(pos)
+            signal = self.sell_engine.check_all_strategies(pos, portfolio_pnl_pct=portfolio_pnl_pct)
             if signal:
+                # 去重：该持仓该策略今日已有待处理信号则跳过
+                if self.db.has_pending_sell_signal(pos["etf_code"], signal.strategy_type):
+                    continue
                 # Save signal to DB
                 signal_dict = {
                     "signal_id": signal.signal_id,

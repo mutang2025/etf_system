@@ -1,14 +1,19 @@
 """REST API routes for the ETF trading system."""
 
+import asyncio
+import json
 from datetime import datetime
 from typing import Optional
 from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from src.infrastructure.database_repo import DatabaseRepository
 from src.infrastructure.data_provider_factory import get_data_provider
 from src.screening.screening_engine import ScreeningEngine
 from src.trading.buy_signal import BuySignalEngine
 from src.trading.position_manager import PositionManager
+from src.trading.scan_tasks import run_buy_scan, run_sell_scan
+from src.realtime_scanner import get_scanner
 from config import settings
 
 router = APIRouter()
@@ -230,6 +235,9 @@ async def run_screening():
 
     summary = screening.get_screening_summary(results)
 
+    # 手动重跑选股后使当日推荐缓存失效，下一轮买入扫描将取到最新结果
+    screening.invalidate_cache()
+
     # If empty signal, save it
     if is_empty:
         db.save_signal({
@@ -292,66 +300,15 @@ async def get_signals(
 
 @router.post("/api/signals/buy/scan")
 async def scan_buy_signals():
-    """Scan candidate ETFs for buy signal conditions."""
+    """Scan candidate ETFs for buy signal conditions (manual trigger)."""
     screening = get_screening()
     buy_engine = get_buy_engine()
     db = get_db()
     pos_manager = get_pos_manager()
 
-    # Check empty signal
-    is_empty, reason = screening.check_market_empty_signal()
-    if is_empty:
-        return {"message": "市场空仓信号", "reason": reason, "signals": []}
-
-    # Get today's recommendations from screening
-    recommendations = screening.get_today_recommendations()
-    if not recommendations:
-        return {"message": "今日无推荐ETF", "signals": []}
-
-    # Get candidate codes
-    candidate_codes = [r.etf_code for r in recommendations]
-
-    # Check cooldown
-    sold_dates = pos_manager.get_recently_sold_codes()
-    active_codes = [c for c in candidate_codes if not buy_engine.is_in_cooldown(c, sold_dates)]
-
-    # Check existing holdings (don't re-recommend held ETFs)
-    holdings = pos_manager.update_all_positions()
-    held_codes = {p["etf_code"] for p in holdings}
-    scan_codes = [c for c in active_codes if c not in held_codes]
-
-    # Build factor map
-    factor_map = {}
-    for r in recommendations:
-        factor_map[r.etf_code] = {
-            "score": r.layer2_score,
-            "rank": r.layer2_rank,
-            "theme": r.layer3_theme,
-        }
-
-    # Scan
-    signals = buy_engine.scan_candidates(scan_codes, factor_map)
-
-    # Save signals
-    saved = []
-    for signal in signals:
-        signal_dict = {
-            "signal_id": signal.signal_id,
-            "signal_type": "buy",
-            "etf_code": signal.etf_code,
-            "etf_name": signal.etf_name,
-            "trigger_time": signal.trigger_time,
-            "trigger_details": signal.trigger_details,
-            "price": signal.price,
-            "change_pct": signal.change_pct,
-            "suggested_amount": signal.suggested_amount,
-            "factor_summary": signal.factor_summary,
-            "status": "pending",
-        }
-        sig_id = db.save_signal(signal_dict)
-        saved.append({**signal_dict, "signal_id": sig_id})
-
-    return {"scanned": len(scan_codes), "triggered": len(saved), "signals": saved}
+    # 手动触发时先检查当日推荐是否已缓存；缓存为空则强制重跑一次
+    result = run_buy_scan(screening, buy_engine, pos_manager, db)
+    return result
 
 @router.post("/api/signals/{signal_id}/confirm")
 async def confirm_buy_signal(signal_id: str, body: BuyConfirmRequest):
@@ -381,12 +338,9 @@ async def skip_signal(signal_id: str):
 
 @router.post("/api/signals/sell/scan")
 async def scan_sell_signals():
-    """Scan all holding positions for sell signal conditions."""
+    """Scan all holding positions for sell signal conditions (manual trigger)."""
     pos_manager = get_pos_manager()
-    sell_signals = pos_manager.check_holdings_for_sell()
-    return {"scanned": len(pos_manager.get_portfolio_summary()["positions"]),
-            "triggered": len(sell_signals),
-            "signals": sell_signals}
+    return run_sell_scan(pos_manager)
 
 
 # ============ Positions ============
@@ -552,6 +506,94 @@ async def tick_realtime():
             "last_update": last_str,
             "timestamp": datetime.now().strftime("%H:%M:%S"),
         }
+
+
+# ============ Realtime Scanner Daemon ============
+
+@router.get("/api/scanner/status")
+async def get_scanner_status():
+    """Get realtime scanner daemon status (running, scan count, last scan)."""
+    return get_scanner().get_status()
+
+
+@router.get("/api/universe")
+async def get_scan_universe():
+    """Return the current scan universe (whitelist small pool) and K-line cache stats.
+
+    Observability for the real-data performance optimization: shows how many ETFs
+    the scanner actually screens versus the full market, and how many K-lines are
+    served from the persistent on-disk cache (avoiding network re-fetch).
+    """
+    screening = get_screening()
+    provider = get_data_provider()
+    universe = screening.get_scan_universe()
+    use_whitelist = settings.DATA_SOURCE == "akshare" and settings.USE_WHITELIST_POOL
+
+    payload = {
+        "data_source": settings.DATA_SOURCE,
+        "use_whitelist": use_whitelist,
+        "whitelist_size": len(settings.ETF_WHITELIST),
+        "universe_size": len(universe),
+        "universe": [
+            {"code": e.code, "name": e.name, "status": e.status} for e in universe
+        ],
+    }
+    if hasattr(provider, "get_health_status"):
+        health = provider.get_health_status()
+        payload["kline_persistent_cached"] = health.get("cache", {}).get(
+            "kline_persistent_cached", 0
+        )
+    else:
+        payload["kline_persistent_cached"] = 0
+    return payload
+
+
+@router.post("/api/scanner/start")
+async def start_scanner():
+    """Start the realtime scanner daemon manually."""
+    get_scanner().start()
+    return {"message": "实时扫描守护进程已启动", **get_scanner().get_status()}
+
+
+@router.post("/api/scanner/stop")
+async def stop_scanner():
+    """Stop the realtime scanner daemon manually."""
+    get_scanner().stop()
+    return {"message": "实时扫描守护进程已停止", **get_scanner().get_status()}
+
+
+@router.post("/api/scanner/force-scan")
+async def force_scan():
+    """Force one scan immediately (works even outside trading hours). Useful for debug / manual trigger."""
+    scanner = get_scanner()
+    await scanner._do_scan()
+    return scanner.last_scan or {"message": "no scan result"}
+
+
+@router.get("/api/scanner/stream")
+async def scanner_stream():
+    """Server-Sent Events stream of realtime scan results (push on every scan).
+
+    使用 SSE 而非 WebSocket，避免依赖 websockets/wsproto 传输库；浏览器侧
+    用 EventSource 即可消费，满足 PRD 的「实时推送」需求。
+    """
+    scanner = get_scanner()
+    queue = scanner.subscribe()
+
+    async def event_gen():
+        # 连接即推送最近一次快照
+        if scanner.last_scan:
+            yield f"data: {json.dumps(scanner.last_scan, ensure_ascii=False)}\n\n"
+        try:
+            while True:
+                payload = await queue.get()
+                yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+        except asyncio.CancelledError:
+            pass
+        finally:
+            scanner.unsubscribe(queue)
+
+    return StreamingResponse(event_gen(), media_type="text/event-stream")
 
 
 # ============ Data Source Health ============

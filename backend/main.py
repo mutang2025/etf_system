@@ -18,6 +18,7 @@ from config import settings
 from database import init_db
 from src.presentation.routes import router
 from src.infrastructure.database_repo import DatabaseRepository
+from src.realtime_scanner import get_scanner
 
 app = FastAPI(
     title=settings.APP_NAME,
@@ -61,6 +62,24 @@ async def startup_event():
 
     print(f"[Startup] {settings.APP_NAME} v{settings.APP_VERSION} ready on port {settings.PORT}")
 
+    # 启动盘中自动扫描守护进程（PRD: 每 N 秒自动扫描+推送信号）
+    if settings.SCANNER_ENABLED:
+        try:
+            get_scanner().start()
+            print(f"[Startup] Realtime scanner daemon started (interval={settings.SCAN_INTERVAL_SECONDS}s)")
+        except Exception as e:
+            print(f"[Startup] Failed to start scanner daemon: {e}")
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Stop the realtime scanner daemon on shutdown."""
+    try:
+        get_scanner().stop()
+        print("[Shutdown] Realtime scanner daemon stopped")
+    except Exception:
+        pass
+
 
 @app.get("/")
 async def root():
@@ -85,6 +104,19 @@ async def health():
 frontend_dist = Path(__file__).parent.parent / "frontend" / "dist"
 if frontend_dist.exists():
     app.mount("/assets", StaticFiles(directory=frontend_dist / "assets"), name="assets")
+
+
+@app.get("/{full_path:path}")
+async def spa_fallback(full_path: str):
+    """SPA fallback for BrowserRouter client-side routes.
+
+    /api/*, /assets, /docs and /health are matched by earlier routes, so this
+    only catches unmatched GETs (e.g. a hard refresh on /signals => index.html).
+    """
+    frontend_index = Path(__file__).parent.parent / "frontend" / "dist" / "index.html"
+    if frontend_index.exists():
+        return FileResponse(frontend_index)
+    return {"detail": "Frontend not built. Run `npm run build` in frontend/."}
 
 
 if __name__ == "__main__":

@@ -38,6 +38,7 @@ from src.infrastructure.rate_limiter import (
     breaker_hist_sina, breaker_index_sina,
     RATE_LIMITS, get_health_status,
 )
+from src.infrastructure.kline_cache import PersistentKlineStore
 from config import settings
 
 
@@ -77,6 +78,7 @@ class AKShareDataProvider:
         self._etf_map: dict[str, ETF] = {}
         self._realtime_cache: dict[str, dict] = {}
         self._kline_cache: dict[str, list[DailyKline]] = {}
+        self._kline_store = PersistentKlineStore()   # 落盘 K 线缓存（跨重启持久）
         self._hs300_klines: list[DailyKline] = []
 
         # Timestamps for rate-limit aware methods
@@ -241,6 +243,11 @@ class AKShareDataProvider:
             list_date = "2020-01-01"
             status = "excluded" if should_exclude else "active"
 
+            # 白名单小池：被点名的 ETF 直接置为 whitelist 状态，Layer1 基础过滤直通，
+            # 不受流动性/市值门槛影响（这些是我们主动要跟踪的标的）。
+            if settings.USE_WHITELIST_POOL and code in set(settings.ETF_WHITELIST):
+                status = "whitelist"
+
             etf = ETF(
                 code=code, name=name,
                 exchange="SH" if code.endswith(".SH") else "SZ",
@@ -339,13 +346,25 @@ class AKShareDataProvider:
         return [e for e in self._etf_pool if e.status == "active"]
 
     def get_klines(self, etf_code: str, days: int = 120) -> list[DailyKline]:
-        """Return daily K-line data for an ETF (cached after first fetch)."""
-        # Check cache first — no network call
+        """Return daily K-line data for an ETF.
+
+        Cache hierarchy (fastest → slowest):
+        1. in-process ``_kline_cache`` (lost on restart)
+        2. on-disk ``_kline_store``   (persists across restarts — the perf win)
+        3. network fetch from sina    (rate-limited + circuit-breakered), then write back to both
+        """
+        # 1) in-process cache
         if etf_code in self._kline_cache:
             klines = self._kline_cache[etf_code]
             return klines[-days:] if days < len(klines) else klines
 
-        # Fetch from sina with protection
+        # 2) persistent on-disk cache (auto-refreshes once per trading day)
+        cached = self._kline_store.get(etf_code)
+        if cached is not None:
+            self._kline_cache[etf_code] = cached
+            return cached[-days:] if days < len(cached) else cached
+
+        # 3) network fetch with protection
         sina_symbol = self._code_to_sina_symbol(etf_code)
         df = self._fetch_kline_sina(sina_symbol)
         if df is not None:
@@ -363,7 +382,8 @@ class AKShareDataProvider:
                 )
                 klines.append(kline)
             self._kline_cache[etf_code] = klines
-            print(f"[AKShare] K-line loaded: {etf_code} {len(klines)} days", flush=True)
+            self._kline_store.put(etf_code, klines)   # persist for next restart
+            print(f"[AKShare] K-line loaded+persisted: {etf_code} {len(klines)} days", flush=True)
             return klines[-days:] if days < len(klines) else klines
 
         # Circuit open or failed — return empty
@@ -431,6 +451,7 @@ class AKShareDataProvider:
             "etf_pool": len(self._etf_pool),
             "active_etfs": len([e for e in self._etf_pool if e.status == "active"]),
             "kline_cached": len(self._kline_cache),
+            "kline_persistent_cached": self._kline_store.stats()["cached_symbols"],
             "realtime_cached": len(self._realtime_cache),
             "hs300_klines": len(self._hs300_klines),
         }

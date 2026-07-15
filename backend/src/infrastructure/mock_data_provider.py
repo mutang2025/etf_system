@@ -332,12 +332,20 @@ class MockDataProvider:
             rt_price = last.close * (1 + rt_change)
             rt_volume = last.volume * self._random.uniform(0.3, 0.8)
 
+            # 真实量比：近5日均量 / 前15日均量（确定性，基于历史K线）
+            vols = [k.volume for k in klines[-20:]]
+            if len(vols) >= 20 and sum(vols[-20:-5]) > 0:
+                vol_ratio = (sum(vols[-5:]) / 5) / (sum(vols[-20:-5]) / 15)
+            else:
+                vol_ratio = 1.0
+
             self._realtime_cache[etf.code] = {
                 "code": etf.code,
                 "name": etf.name,
                 "price": round(rt_price, 4),
                 "change_pct": round(rt_change * 100, 2),
                 "volume": round(rt_volume, 2),
+                "volume_ratio": round(float(vol_ratio), 2),
                 "amount": round(rt_volume * rt_price / 10, 2),
                 "open": last.open,
                 "high": max(last.high, rt_price),

@@ -29,11 +29,13 @@ class SellStrategyEngine:
         self._peak_tracker: dict[str, float] = {}  # etf_code -> today's peak gain
         self._no_new_high_tracker: dict[str, int] = {}  # etf_code -> minutes since new high
 
-    def check_all_strategies(self, position: dict) -> Optional[SellSignal]:
+    def check_all_strategies(self, position: dict,
+                              portfolio_pnl_pct: float = 0.0) -> Optional[SellSignal]:
         """Check all 7 sell strategies for a position. Returns highest priority triggered signal.
 
         Position dict must contain: etf_code, etf_name, buy_price, buy_shares,
         buy_date, hold_days, is_trend_stock, current_price.
+        portfolio_pnl_pct: 整体组合未实现浮亏百分比，用于紧急熔断（PRD 要求组合层面）。
         """
         etf_code = position["etf_code"]
         current_price = position.get("current_price", 0)
@@ -61,7 +63,7 @@ class SellStrategyEngine:
         # Check all strategies in priority order (highest first)
         # Each returns (triggered, detail, action)
         checks = [
-            self._check_emergency_circuit(position, pnl_pct, pnl_amount),
+            self._check_emergency_circuit(position, pnl_pct, pnl_amount, portfolio_pnl_pct),
             self._check_high_open_dump(position, today_change, indicators, current_time),
             self._check_danger_signal(position, indicators),
             self._check_trend_analysis(position, indicators),
@@ -91,15 +93,24 @@ class SellStrategyEngine:
         return None
 
     def _check_emergency_circuit(self, pos: dict, pnl_pct: float,
-                                  pnl_amount: float) -> tuple:
+                                  pnl_amount: float,
+                                  portfolio_pnl_pct: float = 0.0) -> tuple:
         """Priority 100: Emergency Circuit Breaker.
 
-        Triggers when: system abnormality, consecutive losses, or total floating loss > 5%.
+        PRD 要求「整体组合浮亏 > 5%」触发，而非单笔持仓。这里以组合整体未实现
+        盈亏比例为准；同时保留单笔浮亏 <= 阈值的硬止损作为额外安全网。
         """
+        # 组合层面：整体组合浮亏超过阈值即清仓
+        if portfolio_pnl_pct <= settings.EMERGENCY_LOSS_THRESHOLD:
+            return (True, SellStrategyType.EMERGENCY_CIRCUIT.value, 100,
+                    SellAction.CLEAR_ALL.value,
+                    f"整体组合浮亏{portfolio_pnl_pct:.2f}%超过紧急熔断阈值"
+                    f"{settings.EMERGENCY_LOSS_THRESHOLD}%，立即清仓保全本金")
+        # 单笔硬止损（更严格的个别保护）
         if pnl_pct <= settings.EMERGENCY_LOSS_THRESHOLD:
             return (True, SellStrategyType.EMERGENCY_CIRCUIT.value, 100,
                     SellAction.CLEAR_ALL.value,
-                    f"持仓浮亏{pnl_pct:.2f}%超过紧急熔断阈值{settings.EMERGENCY_LOSS_THRESHOLD}%，立即清仓保全本金")
+                    f"持仓{pos.get('etf_code', '')}浮亏{pnl_pct:.2f}%触及紧急止损线，立即清仓")
         return (False, "", 0, "", "")
 
     def _check_high_open_dump(self, pos: dict, today_change: float,

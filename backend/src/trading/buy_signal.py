@@ -51,27 +51,21 @@ class BuySignalEngine:
             cond1 = deviation <= settings.BUY_MA5_TOLERANCE
             cond1_detail = f"当前价{current_price:.4f} vs MA5={ma5:.4f}，偏离{deviation*100:.2f}%（阈值{settings.BUY_MA5_TOLERANCE*100}%）"
 
-        # Condition 2: Main capital surge (volume surge in recent minutes)
-        # MVP: Use daily volume ratio as proxy since we don't have tick data
-        # Check if current volume rate > 2x normal
+        # Condition 2: 主力资金异动（量能异动）
+        # MVP 无分时tick数据，改用真实量比判定：实时量比 >= BUY_VOLUME_SURGE_MULT(2.0)。
+        # 实时量比由数据源提供（mock 下基于该ETF近20日量能比确定性生成），
+        # 不再使用随机因子模拟，保证信号可解释、可复现。
         recent_volumes = [k.volume for k in klines[-5:]]
         avg_5d_vol = np.mean(recent_volumes) if recent_volumes else 0
         current_vol = rt.get("volume", 0)
 
-        # Simulate minute-level volume surge: if current volume is pacing ahead
-        # of 5-day average for this time of day
         if avg_5d_vol > 0:
-            # Assume we're partway through the day, estimate projected volume
-            # Use a random factor to simulate surge events
-            # Use real volume_ratio from realtime data if available, otherwise simulate
             rt_volume_ratio = rt.get("volume_ratio", 0)
-            if rt_volume_ratio and rt_volume_ratio > 0:
-                surge_factor = float(rt_volume_ratio) / max(settings.BUY_VOLUME_RATIO, 0.1)
-            else:
-                surge_factor = self.mock._rng.uniform(0.8, 3.0)
-            projected_vol = current_vol * surge_factor
-            cond2 = projected_vol >= avg_5d_vol * settings.BUY_VOLUME_SURGE_MULT * 0.3
-            cond2_detail = f"模拟分钟级量能：预估量{projected_vol:.0f} vs 5日均量{avg_5d_vol:.0f}（倍数{projected_vol/avg_5d_vol:.2f}，阈值{settings.BUY_VOLUME_SURGE_MULT}）"
+            # 实时量比缺失时用当日成交量/5日均量兜底
+            computed_ratio = current_vol / avg_5d_vol if current_vol > 0 else 0
+            effective_ratio = rt_volume_ratio if (rt_volume_ratio and rt_volume_ratio > 0) else computed_ratio
+            cond2 = effective_ratio >= settings.BUY_VOLUME_SURGE_MULT
+            cond2_detail = f"主力资金异动：量比{effective_ratio:.2f}（阈值{settings.BUY_VOLUME_SURGE_MULT}）"
         else:
             cond2 = False
             cond2_detail = "成交量数据不足"

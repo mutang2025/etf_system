@@ -20,6 +20,28 @@ class ScreeningEngine:
     def __init__(self, data_provider=None):
         self.mock = data_provider or get_data_provider()
         self._pipeline_counts: dict = {}  # track counts per layer
+        self._rec_cache: dict = {}  # date -> list[ScreeningResult] 当日推荐缓存
+
+    def get_scan_universe(self) -> list[ETF]:
+        """Resolve the set of ETFs the scanner should screen.
+
+        Performance optimization for real-data mode: when ``DATA_SOURCE == 'akshare'``
+        and the whitelist pool is enabled, only the curated ``ETF_WHITELIST`` subset of
+        the full market is returned. This is what shrinks Layer 2's per-symbol K-line
+        fetches from ~1500 to ~36.
+
+        Mock mode (and any misconfiguration that yields an empty whitelist intersection)
+        falls back to the full pool so behaviour is unchanged and tests stay stable.
+        """
+        pool = self.mock.get_etf_pool()
+        if settings.DATA_SOURCE == "akshare" and settings.USE_WHITELIST_POOL and settings.ETF_WHITELIST:
+            wl = set(settings.ETF_WHITELIST)
+            universe = [e for e in pool if e.code in wl]
+            if universe:
+                print(f"[Screening] Whitelist pool: {len(universe)} ETFs (from {len(pool)} total)")
+                return universe
+            print("[Screening] WARNING: whitelist produced empty universe — falling back to full pool")
+        return pool
 
     def run_full_screening(self, select_date: Optional[str] = None) -> list[ScreeningResult]:
         """Run the complete four-layer screening pipeline.
@@ -30,8 +52,8 @@ class ScreeningEngine:
         if select_date is None:
             select_date = datetime.now().strftime("%Y-%m-%d")
 
-        # Get all ETFs from pool
-        all_etfs = self.mock.get_etf_pool()
+        # Get ETFs from the (possibly whitelisted) scan universe
+        all_etfs = self.get_scan_universe()
         print(f"[Screening] Layer 0: {len(all_etfs)} ETFs in pool")
         self._pipeline_counts = {"pool_total": len(all_etfs)}
 
@@ -378,9 +400,22 @@ class ScreeningEngine:
         return None
 
     def get_today_recommendations(self) -> list[ScreeningResult]:
-        """Get today's recommended ETFs (final picks from screening)."""
+        """Get today's recommended ETFs (final picks from screening).
+
+        同一交易日缓存结果，避免盘中守护进程每轮（默认10秒）重跑整条
+        四层漏斗选股，既慢又可能取到不一致的快照。
+        """
+        today = datetime.now().strftime("%Y-%m-%d")
+        if today in self._rec_cache:
+            return self._rec_cache[today]
         results = self.run_full_screening()
-        return [r for r in results if r.final_recommended]
+        recs = [r for r in results if r.final_recommended]
+        self._rec_cache[today] = recs
+        return recs
+
+    def invalidate_cache(self) -> None:
+        """Invalidate cached recommendations (e.g., after manual re-screening or param change)."""
+        self._rec_cache.clear()
 
     def check_market_empty_signal(self) -> tuple[bool, str]:
         """Check if market condition triggers empty signal (空仓信号).

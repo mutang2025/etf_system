@@ -177,6 +177,20 @@ class DatabaseRepository:
         """Get pending signals of a type."""
         return self.get_signals(signal_type=signal_type, status="pending")
 
+    def has_pending_sell_signal(self, etf_code: str, strategy_type: str) -> bool:
+        """Check if there is already a pending sell signal for this ETF+strategy today.
+
+        Used to de-duplicate sell signals emitted by the realtime daemon.
+        """
+        today = datetime.now().strftime("%Y-%m-%d")
+        row = self.conn.execute("""
+            SELECT 1 FROM signals
+            WHERE signal_type='sell' AND etf_code=? AND sell_strategy=? AND status='pending'
+              AND date(trigger_time)=?
+            LIMIT 1
+        """, (etf_code, strategy_type, today)).fetchone()
+        return row is not None
+
     def update_signal_status(self, signal_id: str, status: str,
                               extra: Optional[dict] = None) -> bool:
         """Update signal status (confirmed/skipped/executed)."""

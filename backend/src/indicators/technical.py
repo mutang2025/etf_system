@@ -41,8 +41,10 @@ def calc_rsi(close: pd.Series, length: int = 14) -> pd.Series:
     loss = -delta.clip(upper=0)
     avg_gain = gain.rolling(window=length, min_periods=length).mean()
     avg_loss = loss.rolling(window=length, min_periods=length).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rs = avg_gain / avg_loss
     rsi = 100 - (100 / (1 + rs))
+    # 零下跌（有上涨）-> RSI=100；零下跌且零上涨 -> 保持中性 50
+    rsi = rsi.where(avg_loss != 0, np.where(avg_gain > 0, 100.0, 50.0))
     return rsi.fillna(50)
 
 
@@ -200,40 +202,29 @@ def calc_vr(close: pd.Series, volume: pd.Series, length: int = 20) -> float:
     return float(up_vol / down_vol)
 
 
-def check_death_cross(close: pd.Series) -> bool:
-    """Check if 5/10/20/30/60-day MAs simultaneously form a death cross.
+def check_bearish_arrangement(close: pd.Series) -> bool:
+    """五重死叉 / 空头排列判定。
 
-    Death cross event: short MA crosses below long MA on the current day.
-    Checks pairs (5,10), (10,20), (20,30), (30,60).
+    PRD 与 README 实际语义为「空头排列」：短期均线完全位于长期均线下方且
+    向下发散（MA5 < MA10 < MA20 < MA30 < MA60），且收盘价低于 MA5。
+    原实现要求四对均线「同一天」同时下穿，真实市场几乎不可能发生，导致
+    该风控首关长期失效。改为空头排列后，空头趋势中可稳定触发。
     """
     if len(close) < 61:
         return False
 
-    ma5 = sma(close, 5)
-    ma10 = sma(close, 10)
-    ma20 = sma(close, 20)
-    ma30 = sma(close, 30)
-    ma60 = sma(close, 60)
+    ma5 = sma(close, 5).iloc[-1]
+    ma10 = sma(close, 10).iloc[-1]
+    ma20 = sma(close, 20).iloc[-1]
+    ma30 = sma(close, 30).iloc[-1]
+    ma60 = sma(close, 60).iloc[-1]
 
-    if ma5.isna().iloc[-1] or ma60.isna().iloc[-1]:
+    if any(np.isnan(v) for v in [ma5, ma10, ma20, ma30, ma60]):
         return False
 
-    pairs = [(ma5, ma10), (ma10, ma20), (ma20, ma30), (ma30, ma60)]
-    crosses = []
-    for short_ma, long_ma in pairs:
-        # Previous day: short >= long, Today: short < long => death cross
-        prev_short = short_ma.iloc[-2]
-        prev_long = long_ma.iloc[-2]
-        curr_short = short_ma.iloc[-1]
-        curr_long = long_ma.iloc[-1]
-
-        if np.isnan(prev_short) or np.isnan(prev_long) or np.isnan(curr_short) or np.isnan(curr_long):
-            crosses.append(False)
-        else:
-            is_cross = prev_short >= prev_long and curr_short < curr_long
-            crosses.append(is_cross)
-
-    return all(crosses)
+    bearish = ma5 < ma10 < ma20 < ma30 < ma60
+    price_below = close.iloc[-1] < ma5
+    return bool(bearish and price_below)
 
 
 def check_volume_price_divergence(close: pd.Series, volume: pd.Series, lookback: int = 10) -> bool:
@@ -373,7 +364,8 @@ class IndicatorCalculator:
             "is_uptrend_arrangement": is_uptrend_arrangement(close),
             "is_trend_stock": is_trend_stock(close, open_),
             "trend_break": check_trend_break(close, 20, 3),
-            "death_cross": check_death_cross(close),
+            "bearish_arrangement": check_bearish_arrangement(close),
+            "death_cross": check_bearish_arrangement(close),  # 兼容键：实际语义为空头排列
             "volume_price_divergence": check_volume_price_divergence(close, volume, 10),
             "bollinger_breakout": check_bollinger_breakout(close, settings.BB_STD_MULT),
             "adx_danger": check_adx_danger(high, low, close, settings.ADX_THRESHOLD),

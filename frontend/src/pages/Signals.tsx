@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import { RefreshCw, Check, X, Bell } from 'lucide-react'
 import { api } from '../services/api'
 import type { BuySignal } from '../types'
+import { useLiveRefresh, LivePill } from '../services/scannerContext'
 
 export default function Signals() {
   const [signals, setSignals] = useState<BuySignal[]>([])
@@ -28,6 +29,7 @@ export default function Signals() {
   }
 
   useEffect(() => { loadSignals() }, [filterType, filterStatus])
+  useLiveRefresh(loadSignals)
 
   const scanBuy = async () => {
     setScanning(true)
@@ -75,7 +77,7 @@ export default function Signals() {
     <div className="p-6 space-y-4">
       <div className="flex items-center justify-between">
         <div>
-          <h2 className="text-xl font-bold text-gray-800">信号中心</h2>
+          <h2 className="text-xl font-bold text-gray-800">信号中心<LivePill /></h2>
           <p className="text-sm text-gray-500 mt-1">买入/卖出信号管理</p>
         </div>
         <div className="flex gap-2">

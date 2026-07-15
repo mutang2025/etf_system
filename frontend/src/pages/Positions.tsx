@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import { RefreshCw, Wallet, TrendingUp, TrendingDown } from 'lucide-react'
 import { api } from '../services/api'
 import type { Position, PortfolioSummary } from '../types'
+import { useLiveRefresh, LivePill } from '../services/scannerContext'
 
 export default function Positions() {
   const [positions, setPositions] = useState<Position[]>([])
@@ -27,6 +28,7 @@ export default function Positions() {
   }
 
   useEffect(() => { loadData() }, [tab])
+  useLiveRefresh(loadData)
 
   const handleSell = async (pos: Position) => {
     try {
@@ -48,7 +50,7 @@ export default function Positions() {
     <div className="p-6 space-y-4">
       <div className="flex items-center justify-between">
         <div>
-          <h2 className="text-xl font-bold text-gray-800">持仓看板</h2>
+          <h2 className="text-xl font-bold text-gray-800">持仓看板<LivePill /></h2>
           <p className="text-sm text-gray-500 mt-1">持仓管理与盈亏跟踪</p>
         </div>
         <button onClick={loadData} className="btn-secondary">

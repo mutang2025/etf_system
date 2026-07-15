@@ -7,3 +7,5 @@ numpy==1.26.4
 pandas==2.2.2
 scipy==1.14.1
 python-dotenv==1.0.1
+akshare==1.18.64
+tzdata==2024.1

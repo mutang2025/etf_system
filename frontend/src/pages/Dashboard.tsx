@@ -2,10 +2,13 @@ import { useState, useEffect } from 'react'
 import { TrendingUp, TrendingDown, Wallet, Bell, AlertCircle, Activity } from 'lucide-react'
 import { api } from '../services/api'
 import type { DashboardData } from '../types'
+import { useLiveRefresh, LivePill } from '../services/scannerContext'
 
 export default function Dashboard() {
   const [data, setData] = useState<DashboardData | null>(null)
   const [loading, setLoading] = useState(true)
+  const [busy, setBusy] = useState<string | null>(null)
+  const [toast, setToast] = useState<{ type: 'success' | 'error'; msg: string } | null>(null)
 
   const loadData = async () => {
     try {
@@ -18,7 +21,28 @@ export default function Dashboard() {
     }
   }
 
+  const runAction = async (
+    key: string,
+    fn: () => Promise<any>,
+    successMsg: (r: any) => string,
+  ) => {
+    if (busy) return
+    setBusy(key)
+    setToast(null)
+    try {
+      const result = await fn()
+      await loadData()
+      setToast({ type: 'success', msg: successMsg(result) })
+    } catch (e: any) {
+      setToast({ type: 'error', msg: e?.message || '操作失败，请重试' })
+    } finally {
+      setBusy(null)
+      window.setTimeout(() => setToast(null), 4500)
+    }
+  }
+
   useEffect(() => { loadData() }, [])
+  useLiveRefresh(loadData)
 
   if (loading) return <div className="p-8 text-center text-gray-500">加载中...</div>
   if (!data) return <div className="p-8 text-center text-red-500">加载失败，请确保后端服务已启动</div>
@@ -27,12 +51,25 @@ export default function Dashboard() {
 
   return (
     <div className="p-6 space-y-6">
+      {toast && (
+        <div className={`fixed top-4 left-1/2 -translate-x-1/2 z-50 px-4 py-2 rounded-xl shadow-lg backdrop-blur-md text-sm font-medium ${
+          toast.type === 'success' ? 'bg-emerald-500/90 text-white' : 'bg-red-500/90 text-white'
+        }`}>
+          {toast.msg}
+        </div>
+      )}
       <div className="flex items-center justify-between">
         <div>
-          <h2 className="text-xl font-bold text-gray-800">交易看板</h2>
+          <h2 className="text-xl font-bold text-gray-800">交易看板<LivePill /></h2>
           <p className="text-sm text-gray-500 mt-1">{new Date().toLocaleDateString('zh-CN', { dateStyle: 'full' })}</p>
         </div>
-        <button onClick={loadData} className="btn-secondary">刷新</button>
+        <button
+          onClick={() => runAction('refresh', () => Promise.resolve(), () => '看板已刷新')}
+          disabled={busy !== null}
+          className="btn-secondary disabled:opacity-60 disabled:cursor-not-allowed"
+        >
+          {busy === 'refresh' ? '刷新中…' : '刷新'}
+        </button>
       </div>
 
       {/* Market Status */}
@@ -147,24 +184,27 @@ export default function Dashboard() {
       </div>
 
       {/* Quick Actions */}
-      <div className="flex gap-3">
+      <div className="flex flex-wrap gap-3">
         <button
-          onClick={async () => { await api.runScreening(); loadData(); }}
-          className="btn-primary"
+          onClick={() => runAction('screen', () => api.runScreening(), (r) => `选股完成：今日推荐 ${r?.summary?.final_recommended ?? 0} 只`)}
+          disabled={busy !== null}
+          className="btn-primary disabled:opacity-60 disabled:cursor-not-allowed"
         >
-          运行今日选股
+          {busy === 'screen' ? '选股中…' : '运行今日选股'}
         </button>
         <button
-          onClick={async () => { await api.scanBuySignals(); loadData(); }}
-          className="btn-secondary"
+          onClick={() => runAction('buy', () => api.scanBuySignals(), (r) => `买入扫描完成：扫描 ${r?.scanned ?? 0} 只，触发 ${r?.triggered ?? 0} 个信号`)}
+          disabled={busy !== null}
+          className="btn-secondary disabled:opacity-60 disabled:cursor-not-allowed"
         >
-          扫描买入信号
+          {busy === 'buy' ? '扫描中…' : '扫描买入信号'}
         </button>
         <button
-          onClick={async () => { await api.scanSellSignals(); loadData(); }}
-          className="btn-secondary"
+          onClick={() => runAction('sell', () => api.scanSellSignals(), (r) => `卖出扫描完成：扫描 ${r?.scanned ?? 0} 只，触发 ${r?.triggered ?? 0} 个信号`)}
+          disabled={busy !== null}
+          className="btn-secondary disabled:opacity-60 disabled:cursor-not-allowed"
         >
-          扫描卖出信号
+          {busy === 'sell' ? '扫描中…' : '扫描卖出信号'}
         </button>
       </div>
     </div>
