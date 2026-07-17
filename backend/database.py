@@ -99,6 +99,20 @@ def _create_tables(conn: sqlite3.Connection) -> None:
         UNIQUE(select_date, etf_code)
     );
 
+    -- 选股运行快照：保存每次 run 的完整漏斗宽度（来自全流水线，
+    -- 而非仅入库的 layer3+ 子集），供「进入页面读取最新一次」与
+    -- 「点击运行选股」两条路径展示完全一致的漏斗。
+    CREATE TABLE IF NOT EXISTS screening_runs (
+        select_date TEXT PRIMARY KEY,
+        pool_total INTEGER DEFAULT 0,
+        layer1 INTEGER DEFAULT 0,
+        layer2 INTEGER DEFAULT 0,
+        layer3 INTEGER DEFAULT 0,
+        layer4 INTEGER DEFAULT 0,
+        final INTEGER DEFAULT 0,
+        ran_at TEXT DEFAULT (datetime('now', 'localtime'))
+    );
+
     -- Signals (买入/卖出信号)
     CREATE TABLE IF NOT EXISTS signals (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -148,6 +162,11 @@ def _create_tables(conn: sqlite3.Connection) -> None:
         updated_at TEXT DEFAULT (datetime('now', 'localtime'))
     );
 
+    -- 持仓中唯一约束：同一 ETF 只能有一条 holding 记录（防止重复开仓）。
+    -- 已平仓(sold)记录可重复存在，故用部分唯一索引仅约束 status='holding'。
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_positions_open_unique
+        ON positions(etf_code) WHERE status='holding';
+
     -- Strategy parameters (策略参数配置)
     CREATE TABLE IF NOT EXISTS strategy_params (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -177,6 +196,22 @@ def _create_tables(conn: sqlite3.Connection) -> None:
         sync_status TEXT DEFAULT 'success',
         details TEXT,                       -- JSON: 变更明细
         created_at TEXT DEFAULT (datetime('now', 'localtime'))
+    );
+
+    -- 待买入池（信号自动入池，人工从池子买入/移出；卖出扫描也覆盖池子）
+    CREATE TABLE IF NOT EXISTS pending_buy_pool (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        etf_code TEXT NOT NULL,
+        etf_name TEXT,
+        entry_price REAL NOT NULL,         -- 入池点位（信号触发时现价）
+        enter_time TEXT,                   -- 入池时间
+        status TEXT DEFAULT 'watching',    -- watching / sold
+        sell_price REAL,                  -- 被卖出扫描标记时的卖出点位
+        sell_time TEXT,
+        pnl_pct REAL,                    -- (sell_price/entry_price - 1) * 100，仅百分比
+        created_at TEXT DEFAULT (datetime('now', 'localtime')),
+        updated_at TEXT DEFAULT (datetime('now', 'localtime')),
+        UNIQUE(etf_code)
     );
 
     -- System logs

@@ -32,9 +32,11 @@ export default function Positions() {
 
   const handleSell = async (pos: Position) => {
     try {
+      const action = sellActions.find(a => a.label === sellStrategy)?.action ?? 'manual'
       await api.sellPosition(pos.id!, {
         sell_price: parseFloat(sellPrice) || pos.current_price,
         sell_strategy: sellStrategy,
+        sell_action: action,
       })
       setSellingId(null)
       setSellPrice('')
@@ -44,7 +46,13 @@ export default function Positions() {
     }
   }
 
-  const strategies = ['紧急熔断', '高开砸盘', '危险信号', '趋势分析', '止盈止损', '冲高回落', '强制减仓', '手动']
+  const sellActions: { label: string; action: string }[] = [
+    { label: '全平（清仓）', action: 'CLEAR_ALL' },
+    { label: '减仓 50%', action: 'REDUCE_50' },
+    { label: '减仓 1/3', action: 'REDUCE_33' },
+    { label: '减仓一半', action: 'REDUCE_HALF' },
+    { label: '手动', action: 'manual' },
+  ]
 
   return (
     <div className="p-6 space-y-4">
@@ -191,7 +199,7 @@ export default function Positions() {
                         onChange={e => setSellStrategy(e.target.value)}
                         className="px-2 py-1 border border-gray-300 rounded text-xs"
                       >
-                        {strategies.map(s => <option key={s} value={s}>{s}</option>)}
+                        {sellActions.map(a => <option key={a.action} value={a.label}>{a.label}</option>)}
                       </select>
                       <div className="flex gap-1">
                         <button onClick={() => handleSell(pos)} className="btn-danger text-xs px-2 py-1">确认</button>

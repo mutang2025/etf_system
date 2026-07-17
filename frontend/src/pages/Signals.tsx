@@ -172,7 +172,7 @@ export default function Signals() {
                         <div>
                           <span className="text-gray-400">盈亏</span>
                           <p className={`font-medium ${(sig.pnl_pct || 0) >= 0 ? 'text-red-500' : 'text-green-500'}`}>
-                            {sig.pnl_pct >= 0 ? '+' : ''}{sig.pnl_pct?.toFixed(2)}%
+                            {(sig.pnl_pct || 0) >= 0 ? '+' : ''}{(sig.pnl_pct || 0).toFixed(2)}%
                           </p>
                         </div>
                         <div>

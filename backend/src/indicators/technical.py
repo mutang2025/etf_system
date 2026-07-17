@@ -296,7 +296,7 @@ def is_trend_stock(close: pd.Series, open_: pd.Series) -> bool:
     recent_close = close.tail(10)
     recent_open = open_.tail(10)
     up_days = (recent_close > recent_open).sum()
-    return up_days >= 7
+    return bool(up_days >= 7)  # Python bool (numpy bool_ is not JSON-serializable)
 
 
 def check_trend_break(close: pd.Series, ma_days: int = 20, break_days: int = 3) -> bool:

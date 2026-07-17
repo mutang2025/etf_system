@@ -9,8 +9,12 @@ from typing import Optional
 import numpy as np
 
 from src.domain.entities import ETF, ScreeningResult, FactorScore
-from src.indicators.technical import IndicatorCalculator
 from src.infrastructure.data_provider_factory import get_data_provider
+from src.infrastructure.indicator_cache import (
+    get_cached_indicators,
+    DEFAULT_INDICATOR_DAYS,
+)
+from src.infrastructure.timeutil import CST
 from config import settings
 
 
@@ -20,7 +24,8 @@ class ScreeningEngine:
     def __init__(self, data_provider=None):
         self.mock = data_provider or get_data_provider()
         self._pipeline_counts: dict = {}  # track counts per layer
-        self._rec_cache: dict = {}  # date -> list[ScreeningResult] 当日推荐缓存
+        self._rec_cache: dict = {}   # date -> list[ScreeningResult] 当日最终推荐（top-N，稳定对象）
+        self._full_cache: dict = {}   # date -> list[ScreeningResult] 当日全量结果（layer4 通过集等派生用）
 
     def get_scan_universe(self) -> list[ETF]:
         """Resolve the set of ETFs the scanner should screen.
@@ -50,7 +55,7 @@ class ScreeningEngine:
         with final_recommended=True for the 1-2 final picks.
         """
         if select_date is None:
-            select_date = datetime.now().strftime("%Y-%m-%d")
+            select_date = datetime.now(CST).strftime("%Y-%m-%d")
 
         # Get ETFs from the (possibly whitelisted) scan universe
         all_etfs = self.get_scan_universe()
@@ -139,8 +144,8 @@ class ScreeningEngine:
 
             # Listing age check: at least 20 trading days
             if etf.list_date:
-                list_dt = datetime.strptime(etf.list_date, "%Y-%m-%d")
-                days_since = (datetime.now() - list_dt).days
+                list_dt = datetime.strptime(etf.list_date, "%Y-%m-%d").date()
+                days_since = (datetime.now(CST).date() - list_dt).days
                 if days_since < 30:  # Approximate 20 trading days
                     continue
 
@@ -162,12 +167,12 @@ class ScreeningEngine:
             etf = self._get_etf(result.etf_code)
             if not etf:
                 continue
-            klines = self.mock.get_klines(result.etf_code, 120)
+            klines = self.mock.get_klines(result.etf_code, DEFAULT_INDICATOR_DAYS)
             if len(klines) < 30:
                 continue
 
-            calc = IndicatorCalculator(klines)
-            indicators = calc.get_all_indicators()
+            # Cached indicators (layer4 below reuses this same entry on a hit)
+            indicators = get_cached_indicators(self.mock, result.etf_code, DEFAULT_INDICATOR_DAYS)
             if not indicators:
                 continue
 
@@ -362,13 +367,14 @@ class ScreeningEngine:
             etf = self._get_etf(result.etf_code)
             if not etf:
                 continue
-            klines = self.mock.get_klines(result.etf_code, 120)
+            klines = self.mock.get_klines(result.etf_code, DEFAULT_INDICATOR_DAYS)
             if len(klines) < 60:
                 result.layer4_passed = False
                 continue
 
-            calc = IndicatorCalculator(klines)
-            indicators = calc.get_all_indicators()
+            # Cached indicators — layer2 above already computed these for the
+            # top-30, so this is a hit inside a single run_full_screening.
+            indicators = get_cached_indicators(self.mock, result.etf_code, DEFAULT_INDICATOR_DAYS)
 
             # 1. Five-fold death cross detection
             result.layer4_death_cross = indicators.get("death_cross", False)
@@ -399,23 +405,49 @@ class ScreeningEngine:
                 return etf
         return None
 
-    def get_today_recommendations(self) -> list[ScreeningResult]:
-        """Get today's recommended ETFs (final picks from screening).
+    def _run_or_cache_full(self) -> list[ScreeningResult]:
+        """Run (or return cached) full screening results for today.
 
-        同一交易日缓存结果，避免盘中守护进程每轮（默认10秒）重跑整条
-        四层漏斗选股，既慢又可能取到不一致的快照。
+        同一交易日缓存全量结果，供 get_today_recommendations 与
+        get_today_layer4_passed 共享，避免盘中守护进程每轮重跑整条漏斗。
         """
-        today = datetime.now().strftime("%Y-%m-%d")
-        if today in self._rec_cache:
-            return self._rec_cache[today]
+        today = datetime.now(CST).strftime("%Y-%m-%d")
+        if today in self._full_cache:
+            return self._full_cache[today]
         results = self.run_full_screening()
-        recs = [r for r in results if r.final_recommended]
-        self._rec_cache[today] = recs
-        return recs
+        self._full_cache[today] = results
+        return results
+
+    def get_today_recommendations(self) -> list[ScreeningResult]:
+        """Get today's final recommendations (top-N picks from screening).
+
+        返回稳定的缓存对象（同一交易日多次调用返回同一 list），
+        供前端展示与买入优先级标记使用。
+        """
+        today = datetime.now(CST).strftime("%Y-%m-%d")
+        if today not in self._rec_cache:
+            full = self._run_or_cache_full()
+            self._rec_cache[today] = [r for r in full if r.final_recommended]
+        return self._rec_cache[today]
+
+    def get_today_layer4_passed(self) -> list[ScreeningResult]:
+        """今日通过 layer4 风险过滤的全部 ETF —— 买入信号扫描的宇宙。
+
+        相比只取 top-N 最终推荐，网口扩大近 10 倍（约 8–10 只），
+        且仍守住四层质量闸门；final_recommended 仅作优先级提示，不再限制扫描面。
+        """
+        full = self._run_or_cache_full()
+        return [r for r in full if r.layer4_passed]
 
     def invalidate_cache(self) -> None:
-        """Invalidate cached recommendations (e.g., after manual re-screening or param change)."""
+        """Invalidate cached results (e.g., after manual re-screening or param change)."""
         self._rec_cache.clear()
+        self._full_cache.clear()
+        # Derived indicators are keyed by (code, days, last_kline_date) and
+        # normally auto-expire when a new daily bar lands; flush them too so a
+        # forced re-screen / param change starts from a clean slate.
+        from src.infrastructure.indicator_cache import get_indicator_cache
+        get_indicator_cache().invalidate()
 
     def check_market_empty_signal(self) -> tuple[bool, str]:
         """Check if market condition triggers empty signal (空仓信号).
@@ -443,3 +475,16 @@ class ScreeningEngine:
             "final_recommended": funnel.get("final", 0),
             "funnel": funnel,
         }
+
+
+# 进程级单例：路由与盘中守护进程共享同一实例，保证「运行选股」后缓存失效
+# 对两条路径同时生效（修复 P0-2：扫描守护进程缓存与路由不一致）。
+_screening_singleton: Optional["ScreeningEngine"] = None
+
+
+def get_screening() -> "ScreeningEngine":
+    """Process-wide ScreeningEngine singleton (shared by API routes and the scanner)."""
+    global _screening_singleton
+    if _screening_singleton is None:
+        _screening_singleton = ScreeningEngine()
+    return _screening_singleton

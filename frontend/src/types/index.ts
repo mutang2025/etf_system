@@ -9,6 +9,7 @@ export interface ETF {
   list_date?: string;
   avg_amount_20d: number;
   total_market_cap: number;
+  change_pct?: number | null;
   status: string;
   data_status: string;
   synced_date?: string;
@@ -123,6 +124,21 @@ export interface Position {
   sell_strategy?: string;
 }
 
+export interface PendingPoolItem {
+  id?: number;
+  etf_code: string;
+  etf_name: string;
+  entry_price: number;        // 入池点位
+  enter_time?: string;
+  status: 'watching' | 'sold';  // 待买入 / 已卖出(被卖出扫描标记)
+  sell_price?: number | null;  // 标记卖出时记录
+  sell_time?: string | null;
+  pnl_pct?: number | null;      // (sell_price/entry_price - 1) * 100，仅百分比
+  // 后端实时富集
+  current_price?: number | null;
+  change_pct?: number | null;
+}
+
 export interface PortfolioSummary {
   total_positions: number;
   total_value: number;
@@ -183,4 +199,53 @@ export interface DashboardData {
     total: number;
     active: number;
   };
+}
+
+// ============ 交易看板 (Market Indices) ============
+export interface IndexQuote {
+  code: string;
+  name: string;
+  color: string;
+  price: number;
+  prev_close: number;
+  open: number;
+  high: number;
+  low: number;
+  change: number;
+  change_pct: number;
+  volume: number;
+  amount: number; // 亿元
+  timestamp: string;
+}
+
+export interface IndexBreadth {
+  up: number;
+  down: number;
+  flat: number;
+  limit_up: number;
+  limit_down: number;
+}
+
+export interface IndicesData {
+  updated_at: string;
+  trading_day: boolean;
+  data_source: string;
+  indices: IndexQuote[];
+  breadth: IndexBreadth;
+}
+
+export interface IndexKline {
+  trade_date: string;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+}
+
+export interface IndexKlineData {
+  code: string;
+  name: string;
+  color: string;
+  klines: IndexKline[];
 }

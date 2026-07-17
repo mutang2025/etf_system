@@ -8,16 +8,13 @@ asyncio 后台循环，交易时段内周期性执行买入/卖出扫描，结�
 
 import asyncio
 from datetime import datetime
-from zoneinfo import ZoneInfo
 from typing import Optional
 
-# 固定使用中国时区，交易时段判定不依赖部署服务器的本地时区设置
-CST = ZoneInfo("Asia/Shanghai")
-
 from config import settings
+from src.infrastructure.timeutil import CST
 from src.infrastructure.database_repo import DatabaseRepository
 from src.infrastructure.data_provider_factory import get_data_provider
-from src.screening.screening_engine import ScreeningEngine
+from src.screening.screening_engine import get_screening
 from src.trading.buy_signal import BuySignalEngine
 from src.trading.position_manager import PositionManager
 from src.trading.scan_tasks import run_buy_scan, run_sell_scan
@@ -28,7 +25,9 @@ class RealtimeScanner:
 
     def __init__(self):
         self.db = DatabaseRepository()
-        self.screening = ScreeningEngine()
+        # 与路由共享同一 ScreeningEngine 单例：手动「运行选股」使缓存失效后，
+        # 守护进程下一轮买入扫描也会取到最新推荐（修复 P0-2）
+        self.screening = get_screening()
         self.buy_engine = BuySignalEngine()
         self.pos_manager = PositionManager(self.db)
         self._running = False
@@ -67,7 +66,7 @@ class RealtimeScanner:
 
     # ---------- main loop ----------
     async def _loop(self) -> None:
-        self.started_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self.started_at = datetime.now(CST).strftime("%Y-%m-%d %H:%M:%S")
         while self._running:
             try:
                 # 跨交易日重置日内跟踪状态（冲高回落/强制减仓计数器、买入保持计时）

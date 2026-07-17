@@ -4,23 +4,28 @@ import asyncio
 import json
 from datetime import datetime
 from typing import Optional
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from src.infrastructure.database_repo import DatabaseRepository
 from src.infrastructure.data_provider_factory import get_data_provider
-from src.screening.screening_engine import ScreeningEngine
+from src.infrastructure.market_indices import get_index_provider
+from src.screening.screening_engine import ScreeningEngine, get_screening
 from src.trading.buy_signal import BuySignalEngine
 from src.trading.position_manager import PositionManager
 from src.trading.scan_tasks import run_buy_scan, run_sell_scan
 from src.realtime_scanner import get_scanner
+from src.presentation.security import require_auth
+from src.infrastructure.indicator_cache import get_indicator_cache
+from src.infrastructure.timeutil import now_cst
+from src.domain.enums import parse_reduce_ratio
 from config import settings
 
-router = APIRouter()
+# 全局鉴权依赖：API_TOKEN 为空时为 no-op（本地开发）；设置后对全路由生效（P1-3）。
+router = APIRouter(dependencies=[Depends(require_auth)])
 
 # Initialize services lazily
 _db: Optional[DatabaseRepository] = None
-_screening: Optional[ScreeningEngine] = None
 _buy_engine: Optional[BuySignalEngine] = None
 _pos_manager: Optional[PositionManager] = None
 
@@ -30,14 +35,9 @@ def get_db() -> DatabaseRepository:
     if _db is None:
         _db = DatabaseRepository()
         _db.init_default_params()
+        # 启动即把库内策略参数加载进内存 config.settings，使引擎读取用户调优值（修 P0-1）
+        _db.load_params_into_settings()
     return _db
-
-
-def get_screening() -> ScreeningEngine:
-    global _screening
-    if _screening is None:
-        _screening = ScreeningEngine()
-    return _screening
 
 
 def get_buy_engine() -> BuySignalEngine:
@@ -59,6 +59,10 @@ def get_pos_manager() -> PositionManager:
 class ETFStatusUpdate(BaseModel):
     status: str  # active / blacklist / whitelist / excluded
 
+
+class PoolBuyRequest(BaseModel):
+    amount: Optional[float] = None  # 买入金额，缺省用单笔仓位上限
+
 class BuyConfirmRequest(BaseModel):
     etf_code: str
     etf_name: str
@@ -69,6 +73,7 @@ class SellConfirmRequest(BaseModel):
     position_id: int
     sell_price: float
     sell_strategy: str = "manual"
+    sell_action: Optional[str] = None  # 减仓动作（REDUCE_*）；为空则按清仓处理
 
 class ParamUpdateRequest(BaseModel):
     key: str
@@ -94,7 +99,7 @@ async def get_dashboard():
     portfolio = pos_manager.get_portfolio_summary()
 
     # Today signals
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = now_cst().strftime("%Y-%m-%d")
     signals = db.get_signals(limit=20)
     buy_signals = [s for s in signals if s["signal_type"] == "buy"]
     sell_signals = [s for s in signals if s["signal_type"] == "sell"]
@@ -120,7 +125,7 @@ async def get_dashboard():
             "hs300_change": hs300_change,
             "is_empty_signal": is_empty,
             "empty_reason": empty_reason,
-            "is_trading_day": datetime.now().weekday() < 5,
+            "is_trading_day": now_cst().weekday() < 5,
         },
         "performance": perf,
         "pool": {
@@ -235,6 +240,10 @@ async def run_screening():
 
     summary = screening.get_screening_summary(results)
 
+    # 持久化完整漏斗快照，保证「进入页面读取最新一次」与「点击运行选股」
+    # 两条路径展示的漏斗完全一致（run_full_screening 只把 layer3+ 子集入库）
+    db.save_screening_run(summary["select_date"], summary["funnel"])
+
     # 手动重跑选股后使当日推荐缓存失效，下一轮买入扫描将取到最新结果
     screening.invalidate_cache()
 
@@ -242,7 +251,7 @@ async def run_screening():
     if is_empty:
         db.save_signal({
             "signal_type": "empty",
-            "trigger_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "trigger_time": now_cst().strftime("%Y-%m-%d %H:%M:%S"),
             "status": "pending",
         })
 
@@ -278,11 +287,99 @@ async def run_screening():
 
 @router.get("/api/screening/results")
 async def get_screening_results(select_date: Optional[str] = None):
-    """Get screening results for a date (default: today)."""
+    """Get the latest saved screening results (default: today, else most recent run).
+
+    Returns the SAME shape as POST /api/screening/run so the frontend can render
+    the stored "latest run" identically to a fresh run:
+        { summary, is_empty_signal, empty_reason, recommendations, all_results }
+    """
+    screening = get_screening()
     db = get_db()
-    date = select_date or datetime.now().strftime("%Y-%m-%d")
-    results = db.get_selection_results(date)
-    return {"select_date": date, "data": results}
+    date = select_date or now_cst().strftime("%Y-%m-%d")
+    rows = db.get_selection_results(date)
+
+    # 默认（未指定日期）且今天还没跑过 -> 回退到"最近一次有结果的日期"，
+    # 保证进入页面即展示最新一次选股结果（而非空白）。
+    if not rows and select_date is None:
+        latest = db.conn.execute(
+            "SELECT select_date FROM selection_results "
+            "GROUP BY select_date ORDER BY select_date DESC LIMIT 1"
+        ).fetchone()
+        if latest:
+            date = latest["select_date"]
+            rows = db.get_selection_results(date)
+
+    # 优先用持久化的完整漏斗快照（与点击运行选股完全一致）；
+    # 没有快照时退化为从入库行反推（仅 layer3+ 子集，宽度偏小）。
+    run_snapshot = db.get_screening_run(date)
+    funnel = None
+    if run_snapshot:
+        funnel = {
+            "pool_total": run_snapshot["pool_total"],
+            "layer1": run_snapshot["layer1"],
+            "layer2": run_snapshot["layer2"],
+            "layer3": run_snapshot["layer3"],
+            "layer4": run_snapshot["layer4"],
+            "final": run_snapshot["final"],
+        }
+
+    # 把 DB 行转成与 run_screening 完全一致的前端结构
+    # （factor_scores 由 layer2_factor_details 的 JSON 字符串解析得到）
+    all_results = []
+    for r in rows:
+        try:
+            factor_scores = json.loads(r.get("layer2_factor_details") or "[]")
+        except Exception:
+            factor_scores = []
+        all_results.append({
+            "etf_code": r["etf_code"],
+            "etf_name": r["etf_name"],
+            "layer1_passed": bool(r["layer1_passed"]),
+            "layer2_score": float(r["layer2_score"]),
+            "layer2_rank": int(r["layer2_rank"]),
+            "factor_scores": factor_scores,
+            "layer3_theme": r.get("layer3_theme"),
+            "layer3_theme_rank": int(r.get("layer3_theme_rank") or 0),
+            "layer3_passed": bool(r["layer3_passed"]),
+            "layer4_death_cross": bool(r["layer4_death_cross"]),
+            "layer4_vol_price_div": bool(r["layer4_vol_price_div"]),
+            "layer4_adx_danger": bool(r["layer4_adx_danger"]),
+            "layer4_bb_risk": bool(r["layer4_bb_risk"]),
+            "layer4_passed": bool(r["layer4_passed"]),
+            "final_recommended": bool(r["final_recommended"]),
+        })
+
+    # 从实际存储结果自算漏斗（run_screening 在跑的过程中设置 _pipeline_counts，
+    # 此处读取路径没有，故直接按行统计，仅作「无快照」时的退化兜底。
+    if funnel is None:
+        funnel = {
+            "pool_total": len(screening.mock.get_etf_pool()),
+            "layer1": sum(1 for r in all_results if r["layer1_passed"]),
+            "layer2": sum(1 for r in all_results if r["layer2_rank"] > 0),
+            "layer3": sum(1 for r in all_results if r["layer3_passed"]),
+            "layer4": sum(1 for r in all_results if r["layer4_passed"]),
+            "final": sum(1 for r in all_results if r["final_recommended"]),
+        }
+    summary = {
+        "select_date": date,
+        "layer1_passed": funnel["layer1"],
+        "layer2_scored": funnel["layer2"],
+        "layer3_clustered": funnel["layer3"],
+        "layer4_passed": funnel["layer4"],
+        "final_recommended": funnel["final"],
+        "funnel": funnel,
+    }
+
+    is_empty, reason = screening.check_market_empty_signal()
+    recommendations = [r for r in all_results if r["final_recommended"]]
+
+    return {
+        "summary": summary,
+        "is_empty_signal": is_empty,
+        "empty_reason": reason if is_empty else "",
+        "recommendations": recommendations,
+        "all_results": all_results,
+    }
 
 
 # ============ Signals ============
@@ -316,17 +413,20 @@ async def confirm_buy_signal(signal_id: str, body: BuyConfirmRequest):
     db = get_db()
     pos_manager = get_pos_manager()
 
-    # Update signal status
-    db.update_signal_status(signal_id, "confirmed")
+    # 建仓（含重复开仓 / 超额校验，统一在 transaction 内完成）
+    try:
+        position = pos_manager.confirm_buy(
+            signal_id=signal_id,
+            etf_code=body.etf_code,
+            etf_name=body.etf_name,
+            buy_price=body.buy_price,
+            buy_amount=body.buy_amount,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
 
-    # Create position
-    position = pos_manager.confirm_buy(
-        signal_id=signal_id,
-        etf_code=body.etf_code,
-        etf_name=body.etf_name,
-        buy_price=body.buy_price,
-        buy_amount=body.buy_amount,
-    )
+    # 若已在待买入池，确认买入后同步移出（避免重复）
+    db.remove_from_pool(body.etf_code)
     return {"message": "买入确认成功", "position": position}
 
 @router.post("/api/signals/{signal_id}/skip")
@@ -341,6 +441,57 @@ async def scan_sell_signals():
     """Scan all holding positions for sell signal conditions (manual trigger)."""
     pos_manager = get_pos_manager()
     return run_sell_scan(pos_manager)
+
+
+# ============ Pending Buy Pool ============
+@router.get("/api/pending-pool")
+async def get_pending_pool(status: Optional[str] = Query(None)):
+    """待买入池列表（自动富集实时价/当日涨跌幅）。status=watching|sold 可筛选。"""
+    db = get_db()
+    mock = get_data_provider()
+    items = db.get_pending_pool(status)
+    for it in items:
+        rt = mock.get_realtime_quote(it["etf_code"])
+        it["current_price"] = rt["price"] if rt else None
+        it["change_pct"] = rt["change_pct"] if rt else None
+    return {"data": items, "total": len(items)}
+
+
+@router.post("/api/pending-pool/{etf_code}/buy")
+async def buy_from_pool(etf_code: str, body: Optional[PoolBuyRequest] = None):
+    """从待买入池买入：建仓（成交价=实时价）并自动移出池子。"""
+    db = get_db()
+    pos_manager = get_pos_manager()
+    item = db.get_pool_row(etf_code)
+    if not item or item["status"] != "watching":
+        raise HTTPException(status_code=404, detail="待买入池中无该可买项")
+    rt = get_data_provider().get_realtime_quote(etf_code)
+    buy_price = rt["price"] if rt else item["entry_price"]
+    # 缺额回退为受总仓位上限约束的建议金额（修复 P1-1）
+    buy_amount = (body.amount if body and body.amount
+                  else pos_manager.suggested_buy_amount())
+    signal_id = f"PBUY-{now_cst().strftime('%Y%m%d')}-{etf_code[-6:]}"
+    try:
+        pos_manager.confirm_buy(
+            signal_id=signal_id, etf_code=etf_code, etf_name=item["etf_name"],
+            buy_price=buy_price, buy_amount=buy_amount,
+        )
+    except ValueError as e:
+        # 防重复开仓（P1-2）：持仓中再买同 ETF 应 409 而非 500
+        raise HTTPException(status_code=409, detail=str(e))
+    db.remove_from_pool(etf_code)
+    return {"message": "已从待买入池买入并建仓", "etf_code": etf_code,
+            "buy_price": buy_price, "buy_amount": round(buy_amount, 2)}
+
+
+@router.post("/api/pending-pool/{etf_code}/remove")
+async def remove_from_pool(etf_code: str):
+    """人工移出待买入池（watching 或 sold 均可）。"""
+    db = get_db()
+    ok = db.remove_from_pool(etf_code)
+    if not ok:
+        raise HTTPException(status_code=404, detail="待买入池中无该项")
+    return {"message": "已移出待买入池", "etf_code": etf_code}
 
 
 # ============ Positions ============
@@ -364,8 +515,30 @@ async def get_positions_summary():
 
 @router.post("/api/positions/{position_id}/sell")
 async def sell_position(position_id: int, body: SellConfirmRequest):
-    """Close a position."""
+    """Close (or partially reduce) a position.
+
+    若 ``body.sell_action`` 是减仓动作（REDUCE_*），按对应比例部分
+    减仓（持仓保持 holding，仅减少份额/成本）；否则按清仓处理。
+    """
     pos_manager = get_pos_manager()
+    ratio = parse_reduce_ratio(body.sell_action)
+    if ratio is not None:
+        # 取 etf_code 供减仓执行层标记对应卖出信号
+        row = pos_manager.db.conn.execute(
+            "SELECT etf_code FROM positions WHERE id=?", (position_id,)
+        ).fetchone()
+        etf_code = row["etf_code"] if row else None
+        rt = get_data_provider().get_realtime_quote(etf_code) if etf_code else None
+        current_price = rt["price"] if rt else None
+        result = pos_manager.reduce_position(
+            position_id, body.sell_price, ratio, body.sell_strategy,
+            current_price=current_price, etf_code=etf_code,
+            sell_action=body.sell_action,
+        )
+        if not result:
+            raise HTTPException(404, "Position not found or nothing to reduce")
+        return {"message": "减仓成功", "position": result, "action": body.sell_action}
+
     result = pos_manager.close_position(position_id, body.sell_price, body.sell_strategy)
     if not result:
         raise HTTPException(404, "Position not found")
@@ -469,11 +642,15 @@ async def get_performance():
         s["total_pnl"] = round(s["total_pnl"], 2)
         s["avg_pnl"] = round(s["total_pnl"] / s["count"], 2) if s["count"] else 0
 
+    # 待买入池历史记录（卖出扫描标记为「已卖出」的项）
+    pool_sold = db.get_pending_pool("sold")
+
     return {
         "stats": stats,
         "monthly": monthly_list,
         "strategy_distribution": list(strategy_dist.values()),
         "trades": closed,
+        "pool_history": pool_sold,
     }
 
 
@@ -496,7 +673,7 @@ async def tick_realtime():
     provider = get_data_provider()
     success = provider.update_realtime()
     if success:
-        return {"message": "行情已更新", "timestamp": datetime.now().strftime("%H:%M:%S")}
+        return {"message": "行情已更新", "timestamp": now_cst().strftime("%H:%M:%S")}
     else:
         # Throttled — return cached data timestamp
         last = getattr(provider, '_last_realtime_update', 0)
@@ -504,7 +681,7 @@ async def tick_realtime():
         return {
             "message": "行情刷新被限流（最小间隔60秒）",
             "last_update": last_str,
-            "timestamp": datetime.now().strftime("%H:%M:%S"),
+            "timestamp": now_cst().strftime("%H:%M:%S"),
         }
 
 
@@ -545,6 +722,8 @@ async def get_scan_universe():
         )
     else:
         payload["kline_persistent_cached"] = 0
+    # Indicator cache stats (P2: collapses per-round N+1 recompute)
+    payload["indicator_cache"] = get_indicator_cache().stats()
     return payload
 
 
@@ -596,6 +775,27 @@ async def scanner_stream():
     return StreamingResponse(event_gen(), media_type="text/event-stream")
 
 
+# ============ 交易看板 (Market Indices) ============
+
+@router.get("/api/indices")
+async def get_indices():
+    """Get real-time quotes for major A-share indices + market breadth.
+
+    交易看板核心接口：覆盖 上证指数 / 深证成指 / 创业板指 / 科创50 /
+    沪深300 / 上证50 / 北证50，并附带涨跌家数（市场宽度）。
+    真实数据优先（akshare 可联网时），离线/本地开发自动降级为 mock 生成器。
+    """
+    provider = get_index_provider()
+    return provider.get_index_quotes()
+
+
+@router.get("/api/indices/{code}/klines")
+async def get_index_klines(code: str, days: int = Query(60, ge=5, le=250)):
+    """Get daily K-line history for a single index (for the board's chart)."""
+    provider = get_index_provider()
+    return provider.get_index_klines(code, days)
+
+
 # ============ Data Source Health ============
 
 @router.get("/api/health/data-source")
@@ -603,8 +803,12 @@ async def get_data_source_health():
     """Get health status of data sources, rate limiters, and circuit breakers."""
     provider = get_data_provider()
     if hasattr(provider, 'get_health_status'):
-        return provider.get_health_status()
-    return {"data_source": settings.DATA_SOURCE, "message": "Mock provider — no rate limits"}
+        health = provider.get_health_status()
+    else:
+        health = {"data_source": settings.DATA_SOURCE, "message": "Mock provider — no rate limits"}
+    # Indicator cache stats (P2: collapses per-round N+1 recompute)
+    health["indicator_cache"] = get_indicator_cache().stats()
+    return health
 
 @router.post("/api/health/circuit-breaker/reset")
 async def reset_circuit_breakers():

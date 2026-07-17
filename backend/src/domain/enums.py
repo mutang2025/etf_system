@@ -1,6 +1,7 @@
 """Enums for the ETF trading system."""
 
 from enum import Enum
+from typing import Optional
 
 
 class ETFType(str, Enum):
@@ -50,12 +51,27 @@ class SellStrategyType(str, Enum):
 
 
 class SellAction(str, Enum):
-    CLEAR_ALL = "清仓"
-    REDUCE_50 = "减仓50%"
-    REDUCE_33 = "卖出1/3"
-    REDUCE_HALF = "卖出一半"
-    STEP_PROFIT = "分步止盈"
-    STOP_LOSS = "止损"
+    CLEAR_ALL = "CLEAR_ALL"
+    REDUCE_50 = "REDUCE_50"
+    REDUCE_33 = "REDUCE_33"
+    REDUCE_HALF = "REDUCE_HALF"
+    STEP_PROFIT = "STEP_PROFIT"
+    STOP_LOSS = "STOP_LOSS"
+
+
+# 减仓动作 -> 卖出占当前持仓的比例。供卖出执行层（部分减仓）落地使用。
+_SELL_REDUCE_RATIO = {
+    SellAction.REDUCE_50.value: 0.5,
+    SellAction.REDUCE_33.value: 1.0 / 3.0,
+    SellAction.REDUCE_HALF.value: 0.5,
+}
+
+
+def parse_reduce_ratio(action: Optional[str]) -> Optional[float]:
+    """返回减仓动作对应的卖出比例；非减仓动作（清仓/止损等）返回 ``None``。"""
+    if action is None:
+        return None
+    return _SELL_REDUCE_RATIO.get(action)
 
 
 class ParamGroup(str, Enum):

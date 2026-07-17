@@ -97,15 +97,16 @@ export default function ETFPool() {
               <th className="px-4 py-3 text-left font-medium text-gray-600">题材</th>
               <th className="px-4 py-3 text-right font-medium text-gray-600">日均成交额(万)</th>
               <th className="px-4 py-3 text-right font-medium text-gray-600">总市值(亿)</th>
+              <th className="px-4 py-3 text-right font-medium text-gray-600">日涨幅</th>
               <th className="px-4 py-3 text-center font-medium text-gray-600">状态</th>
               <th className="px-4 py-3 text-center font-medium text-gray-600">操作</th>
             </tr>
           </thead>
           <tbody>
             {loading ? (
-              <tr><td colSpan={8} className="text-center py-8 text-gray-400">加载中...</td></tr>
+              <tr><td colSpan={9} className="text-center py-8 text-gray-400">加载中...</td></tr>
             ) : etfs.length === 0 ? (
-              <tr><td colSpan={8} className="text-center py-8 text-gray-400">无数据</td></tr>
+              <tr><td colSpan={9} className="text-center py-8 text-gray-400">无数据</td></tr>
             ) : etfs.map(etf => (
               <tr key={etf.code} className="border-b border-gray-50 hover:bg-gray-50">
                 <td className="px-4 py-3 font-mono text-gray-700">{etf.code}</td>
@@ -116,6 +117,9 @@ export default function ETFPool() {
                 <td className="px-4 py-3 text-gray-600">{etf.theme || '-'}</td>
                 <td className="px-4 py-3 text-right text-gray-600">{etf.avg_amount_20d?.toFixed(0)}</td>
                 <td className="px-4 py-3 text-right text-gray-600">{etf.total_market_cap?.toFixed(1)}</td>
+                <td className={`px-4 py-3 text-right font-medium ${etf.change_pct == null ? 'text-gray-400' : etf.change_pct >= 0 ? 'text-red-500' : 'text-green-500'}`}>
+                  {etf.change_pct == null ? '-' : `${etf.change_pct >= 0 ? '+' : ''}${etf.change_pct.toFixed(2)}%`}
+                </td>
                 <td className="px-4 py-3 text-center">
                   <span className={
                     etf.status === 'active' ? 'badge-success' :

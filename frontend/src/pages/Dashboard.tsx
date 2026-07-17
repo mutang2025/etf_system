@@ -1,14 +1,16 @@
 import { useState, useEffect } from 'react'
 import { TrendingUp, TrendingDown, Wallet, Bell, AlertCircle, Activity } from 'lucide-react'
 import { api } from '../services/api'
-import type { DashboardData } from '../types'
+import type { DashboardData, IndicesData, IndexQuote } from '../types'
 import { useLiveRefresh, LivePill } from '../services/scannerContext'
+import { Link } from 'react-router-dom'
 
 export default function Dashboard() {
   const [data, setData] = useState<DashboardData | null>(null)
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState<string | null>(null)
   const [toast, setToast] = useState<{ type: 'success' | 'error'; msg: string } | null>(null)
+  const [indices, setIndices] = useState<IndicesData | null>(null)
 
   const loadData = async () => {
     try {
@@ -44,6 +46,16 @@ export default function Dashboard() {
   useEffect(() => { loadData() }, [])
   useLiveRefresh(loadData)
 
+  const loadIndices = async () => {
+    try {
+      const res = await api.getIndices()
+      setIndices(res)
+    } catch (e) {
+      console.error('加载指数行情失败:', e)
+    }
+  }
+  useEffect(() => { loadIndices() }, [])
+
   if (loading) return <div className="p-8 text-center text-gray-500">加载中...</div>
   if (!data) return <div className="p-8 text-center text-red-500">加载失败，请确保后端服务已启动</div>
 
@@ -60,7 +72,7 @@ export default function Dashboard() {
       )}
       <div className="flex items-center justify-between">
         <div>
-          <h2 className="text-xl font-bold text-gray-800">交易看板<LivePill /></h2>
+          <h2 className="text-xl font-bold text-gray-800">总览<LivePill /></h2>
           <p className="text-sm text-gray-500 mt-1">{new Date().toLocaleDateString('zh-CN', { dateStyle: 'full' })}</p>
         </div>
         <button
@@ -72,32 +84,68 @@ export default function Dashboard() {
         </button>
       </div>
 
-      {/* Market Status */}
-      <div className={`card ${market.is_empty_signal ? 'border-red-300 bg-red-50' : ''}`}>
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className={`p-2 rounded-lg ${market.hs300_change >= 0 ? 'bg-red-50' : 'bg-green-50'}`}>
-              {market.hs300_change >= 0 ? <TrendingUp className="text-red-500" size={20} /> : <TrendingDown className="text-green-500" size={20} />}
-            </div>
-            <div>
-              <p className="text-sm text-gray-500">沪深300</p>
-              <p className={`text-lg font-bold ${market.hs300_change >= 0 ? 'text-red-500' : 'text-green-500'}`}>
-                {market.hs300_change >= 0 ? '+' : ''}{market.hs300_change.toFixed(2)}%
-              </p>
-            </div>
+      {/* 指数速览 */}
+      <div className="card">
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="text-sm font-semibold text-gray-700 flex items-center gap-1.5">
+            <Activity size={16} className="text-primary-600" /> 指数速览
+            {indices && (
+              <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium ${
+                indices.data_source === 'akshare' ? 'bg-green-50 text-green-700' : 'bg-gray-100 text-gray-500'
+              }`}>
+                {indices.data_source === 'akshare' ? '真实行情' : '模拟数据'}
+              </span>
+            )}
+          </h3>
+          <div className="flex items-center gap-2">
+            <Link to="/trading-board" className="text-xs text-primary-600 hover:underline">查看K线 →</Link>
+            {market.is_empty_signal && (
+              <div className="flex items-center gap-1 text-red-600">
+                <AlertCircle size={14} />
+                <span className="text-xs font-medium">空仓信号</span>
+              </div>
+            )}
+            {!market.is_trading_day && <span className="badge-gray text-xs">非交易日</span>}
           </div>
-          {market.is_empty_signal && (
-            <div className="flex items-center gap-2 text-red-600">
-              <AlertCircle size={18} />
-              <span className="text-sm font-medium">空仓信号</span>
-            </div>
-          )}
-          {!market.is_trading_day && (
-            <span className="badge-gray">非交易日</span>
-          )}
         </div>
-        {market.is_empty_signal && market.empty_reason && (
-          <p className="mt-2 text-sm text-red-600">{market.empty_reason}</p>
+
+        {indices ? (
+          <>
+            <div className="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-7 gap-3">
+              {indices.indices.map((idx: IndexQuote) => {
+                const up = idx.change_pct >= 0
+                return (
+                  <div
+                    key={idx.code}
+                    className={`flex flex-col rounded-xl border px-3 py-2.5 transition-colors ${
+                      up ? 'border-red-100 bg-red-50/40' : 'border-green-100 bg-green-50/40'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-1">
+                      <span className="text-xs font-medium text-gray-700 truncate">{idx.name}</span>
+                      <span className="text-[9px] text-gray-400 font-mono shrink-0">{idx.code.split('.')[0]}</span>
+                    </div>
+                    <p className={`text-lg font-bold mt-1 ${up ? 'text-red-500' : 'text-green-500'}`}>
+                      {idx.price.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                    </p>
+                    <span className={`text-xs font-medium ${up ? 'text-red-500' : 'text-green-500'}`}>
+                      {up ? '+' : ''}{idx.change_pct.toFixed(2)}%
+                    </span>
+                  </div>
+                )
+              })}
+            </div>
+            {indices.breadth && (
+              <div className="flex items-center gap-3 mt-3 text-xs text-gray-500">
+                <span className="text-red-500 font-medium">上涨 {indices.breadth.up}</span>
+                <span>平盘 {indices.breadth.flat}</span>
+                <span className="text-green-500 font-medium">下跌 {indices.breadth.down}</span>
+                <span className="ml-auto">涨停 {indices.breadth.limit_up} · 跌停 {indices.breadth.limit_down}</span>
+              </div>
+            )}
+          </>
+        ) : (
+          <div className="text-sm text-gray-400 py-6 text-center">指数行情加载中…</div>
         )}
       </div>
 

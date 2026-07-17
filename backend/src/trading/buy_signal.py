@@ -11,8 +11,12 @@ from typing import Optional
 import numpy as np
 
 from src.domain.entities import BuySignal
-from src.indicators.technical import IndicatorCalculator, sma
 from src.infrastructure.data_provider_factory import get_data_provider
+from src.infrastructure.indicator_cache import (
+    get_cached_indicators,
+    DEFAULT_INDICATOR_DAYS,
+)
+from src.infrastructure.timeutil import now_cst
 from config import settings
 
 
@@ -28,7 +32,7 @@ class BuySignalEngine:
 
         Returns (is_triggered, condition_details).
         """
-        klines = self.mock.get_klines(etf_code, 120)
+        klines = self.mock.get_klines(etf_code, DEFAULT_INDICATOR_DAYS)
         if len(klines) < 10:
             return False, {"error": "insufficient data"}
 
@@ -37,8 +41,8 @@ class BuySignalEngine:
         if not rt:
             return False, {"error": "no realtime data"}
 
-        calc = IndicatorCalculator(klines)
-        indicators = calc.get_all_indicators()
+        # Cached indicators — recomputed only when a new daily bar lands
+        indicators = get_cached_indicators(self.mock, etf_code, DEFAULT_INDICATOR_DAYS)
 
         # Condition 1: Price near MA5 (within ±1.5%)
         ma5 = indicators["MA"].get("MA5")
@@ -98,18 +102,29 @@ class BuySignalEngine:
         return all_met, details
 
     def generate_buy_signal(self, etf_code: str, etf_name: str,
-                           factor_summary: dict) -> Optional[BuySignal]:
-        """Generate a buy signal for an ETF that passed all conditions."""
+                           factor_summary: dict,
+                           available_capital: Optional[float] = None) -> Optional[BuySignal]:
+        """Generate a buy signal for an ETF that passed all conditions.
+
+        available_capital: 可用资金（总资金 - 已持仓投入）。提供后，建议买入金额
+        受单只上限与总仓位上限双重约束（修复 P1-1：原实现恒为 30% 且不扣已持仓）。
+        """
         rt = self.mock.get_realtime_quote(etf_code)
         if not rt:
             return None
 
-        now = datetime.now()
+        now = now_cst()
         signal_id = f"BUY-{now.strftime('%Y%m%d')}-{len(self._condition_hold):02d}"
 
-        # Calculate suggested buy amount
-        # suggested = total_capital * single_position_limit / current_holdings_count + 1
-        suggested_amount = settings.TOTAL_CAPITAL * settings.SINGLE_POSITION_LIMIT
+        # 建议买入金额：受单只上限 + 总仓位上限约束，并扣除已持仓
+        if available_capital is not None:
+            single_cap = settings.TOTAL_CAPITAL * settings.SINGLE_POSITION_LIMIT
+            invested = settings.TOTAL_CAPITAL - available_capital
+            total_room = settings.TOTAL_CAPITAL * settings.TOTAL_POSITION_LIMIT - invested
+            suggested_amount = min(single_cap, total_room, available_capital)
+            suggested_amount = max(suggested_amount, 0.0)
+        else:
+            suggested_amount = settings.TOTAL_CAPITAL * settings.SINGLE_POSITION_LIMIT
 
         signal = BuySignal(
             signal_id=signal_id,
@@ -126,12 +141,14 @@ class BuySignalEngine:
         return signal
 
     def scan_candidates(self, candidate_codes: list[str],
-                       factor_map: dict = None) -> list[BuySignal]:
+                       factor_map: dict = None,
+                       available_capital: Optional[float] = None) -> list[BuySignal]:
         """Scan all candidate ETFs for buy conditions.
 
         Args:
             candidate_codes: ETF codes from screening engine's final recommendations.
             factor_map: Optional dict of etf_code -> factor summary for signal enrichment.
+            available_capital: 可用资金，用于建议金额的总仓位上限约束。
         """
         signals: list[BuySignal] = []
         for code in candidate_codes:
@@ -145,7 +162,9 @@ class BuySignalEngine:
                 if not etf:
                     continue
                 factor_summary = (factor_map or {}).get(code, {})
-                signal = self.generate_buy_signal(code, etf.name, factor_summary)
+                signal = self.generate_buy_signal(
+                    code, etf.name, factor_summary, available_capital
+                )
                 if signal:
                     signal.trigger_details = details
                     signals.append(signal)
@@ -162,8 +181,8 @@ class BuySignalEngine:
             return False
         last_sell = sold_dates[etf_code]
         try:
-            sell_dt = datetime.strptime(last_sell, "%Y-%m-%d")
-            days_since = (datetime.now() - sell_dt).days
+            sell_dt = datetime.strptime(last_sell, "%Y-%m-%d").date()
+            days_since = (now_cst().date() - sell_dt).days
             return days_since < settings.SELL_COOLDOWN_DAYS
         except (ValueError, TypeError):
             return False

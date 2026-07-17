@@ -19,6 +19,7 @@ from database import init_db
 from src.presentation.routes import router
 from src.infrastructure.database_repo import DatabaseRepository
 from src.realtime_scanner import get_scanner
+from src.pool_sync_scheduler import get_pool_sync_scheduler
 
 app = FastAPI(
     title=settings.APP_NAME,
@@ -26,17 +27,34 @@ app = FastAPI(
     description="ETF动量轮动选股系统 - 四层漏斗筛选 + 实时买卖信号 + 持仓管理",
 )
 
-# CORS: allow frontend dev server
+# CORS：受信源默认本地开发服务器；一旦设置 API_TOKEN 则强制收紧到白名单并启用凭据。
+_origins_raw = settings.CORS_ALLOWED_ORIGINS or ""
+_allowed_origins = [o.strip() for o in _origins_raw.split(",") if o.strip()]
+if settings.API_TOKEN:
+    # 安全模式：收紧到白名单，禁止 "*" + credentials 的非法组合
+    allow_origins = _allowed_origins or ["http://localhost:3001"]
+    allow_credentials = True
+    print(f"[CORS] Secure mode: restricted to {allow_origins}")
+else:
+    # 本地开发：开放所有源（凭据关闭，避免 "*" + credentials 非法组合）
+    allow_origins = ["*"]
+    allow_credentials = False
+    print("[CORS] Open mode (no API_TOKEN set): allow all origins, credentials disabled")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Dev only; restrict in production
-    allow_credentials=True,
+    allow_origins=allow_origins,
+    allow_credentials=allow_credentials,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 # Register API routes
 app.include_router(router)
+
+# P3 回测框架（只读分析端点，不修改持仓/信号）
+from src.backtest.api import router as backtest_router
+app.include_router(backtest_router)
 
 
 @app.on_event("startup")
@@ -49,6 +67,8 @@ async def startup_event():
     # Initialize default params
     db = DatabaseRepository(conn)
     db.init_default_params()
+    # 把库内策略参数加载进内存 config.settings，使引擎读取用户调优值（修 P0-1）
+    db.load_params_into_settings()
     print("[Startup] Default strategy parameters initialized")
 
     # Sync ETF pool on first run
@@ -70,13 +90,26 @@ async def startup_event():
         except Exception as e:
             print(f"[Startup] Failed to start scanner daemon: {e}")
 
+    # 启动 ETF 池定时同步守护进程（交易日收盘后自动同步一次）
+    if settings.POOL_SYNC_ENABLED:
+        try:
+            get_pool_sync_scheduler().start()
+            print(f"[Startup] ETF pool sync scheduler started (after_close={settings.POOL_SYNC_AFTER})")
+        except Exception as e:
+            print(f"[Startup] Failed to start pool sync scheduler: {e}")
+
 
 @app.on_event("shutdown")
 async def shutdown_event():
-    """Stop the realtime scanner daemon on shutdown."""
+    """Stop the daemon loops on shutdown."""
     try:
         get_scanner().stop()
         print("[Shutdown] Realtime scanner daemon stopped")
+    except Exception:
+        pass
+    try:
+        get_pool_sync_scheduler().stop()
+        print("[Shutdown] ETF pool sync scheduler stopped")
     except Exception:
         pass
 

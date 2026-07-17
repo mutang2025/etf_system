@@ -26,8 +26,10 @@ Protection layers:
 
 import time
 import random
+import math
+import logging
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Optional, Callable
 import numpy as np
 import pandas as pd
 
@@ -40,6 +42,17 @@ from src.infrastructure.rate_limiter import (
 )
 from src.infrastructure.kline_cache import PersistentKlineStore
 from config import settings
+
+logger = logging.getLogger("akshare_provider")
+
+# 数据告警回调（可注入到外部监控系统）；失败时触发。
+_data_alert_callback: Optional[Callable[[str], None]] = None
+
+
+def set_data_alert_callback(fn: Optional[Callable[[str], None]]) -> None:
+    """设置数据异常告警回调（如推送到钉钉/企业微信/日志平台）。"""
+    global _data_alert_callback
+    _data_alert_callback = fn
 
 
 # Theme keyword mapping — derive theme from ETF name
@@ -83,6 +96,8 @@ class AKShareDataProvider:
 
         # Timestamps for rate-limit aware methods
         self._last_realtime_update: float = 0
+        # 最近一次数据告警（供健康检查暴露）
+        self._last_alert: Optional[str] = None
 
         # Load data
         self._load_etf_pool()
@@ -98,6 +113,16 @@ class AKShareDataProvider:
             return f"sh{bare}"
         else:
             return f"sz{bare}"
+
+    def _alert(self, msg: str) -> None:
+        """记录数据异常告警（logging + 外部回调 + 健康检查可见）。"""
+        logger.error(msg)
+        self._last_alert = msg
+        if _data_alert_callback:
+            try:
+                _data_alert_callback(msg)
+            except Exception:
+                pass
 
     def _add_exchange_suffix(self, bare_code: str) -> str:
         """Add .SH or .SZ suffix to bare code."""
@@ -142,7 +167,7 @@ class AKShareDataProvider:
             return df
         except Exception as e:
             breaker_spot_em.on_failure(str(e)[:120])
-            print(f"[AKShare] spot_em failed: {e}", flush=True)
+            self._alert(f"[AKShare] spot_em 实时行情获取失败: {e}")
             return None
 
     def _fetch_daily_em(self) -> Optional[pd.DataFrame]:
@@ -158,7 +183,7 @@ class AKShareDataProvider:
             return df
         except Exception as e:
             breaker_daily_em.on_failure(str(e)[:120])
-            print(f"[AKShare] daily_em failed: {e}", flush=True)
+            self._alert(f"[AKShare] daily_em 获取失败: {e}")
             return None
 
     def _fetch_kline_sina(self, symbol: str) -> Optional[pd.DataFrame]:
@@ -174,7 +199,7 @@ class AKShareDataProvider:
             return df
         except Exception as e:
             breaker_hist_sina.on_failure(str(e)[:120])
-            print(f"[AKShare] sina kline failed for {symbol}: {e}", flush=True)
+            self._alert(f"[AKShare] sina K线获取失败 {symbol}: {e}")
             return None
 
     def _fetch_index_sina(self, symbol: str) -> Optional[pd.DataFrame]:
@@ -190,7 +215,7 @@ class AKShareDataProvider:
             return df
         except Exception as e:
             breaker_index_sina.on_failure(str(e)[:120])
-            print(f"[AKShare] sina index failed: {e}", flush=True)
+            self._alert(f"[AKShare] sina 指数获取失败: {e}")
             return None
 
     # ============ Data loading methods ============
@@ -267,7 +292,7 @@ class AKShareDataProvider:
         """Refresh realtime quote cache from spot_em."""
         spot_df = self._fetch_spot_em()
         if spot_df is None:
-            print("[AKShare] Realtime refresh skipped — using stale cache", flush=True)
+            self._alert("[AKShare] 实时行情刷新失败，使用缓存/空数据")
             return
 
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -294,7 +319,7 @@ class AKShareDataProvider:
             if price <= 0:
                 continue
 
-            self._realtime_cache[code] = {
+            quote = {
                 "code": code,
                 "name": str(row.get("名称", "")).strip(),
                 "price": round(price, 4),
@@ -308,6 +333,14 @@ class AKShareDataProvider:
                 "volume_ratio": round(volume_ratio, 2),
                 "timestamp": now_str,
             }
+            # 真实行情里个别 ETF（如新股无昨收）会给出 inf/nan 的涨跌幅，
+            # 这些非有限浮点无法被 JSON 序列化（FastAPI 会 500）。
+            # 统一兜底为 None，避免整批行情接口崩溃。
+            for k, v in quote.items():
+                if isinstance(v, float) and not math.isfinite(v):
+                    quote[k] = None
+
+            self._realtime_cache[code] = quote
 
         self._last_realtime_update = time.time()
         print(f"[AKShare] Realtime quotes loaded: {len(self._realtime_cache)} ETFs", flush=True)
@@ -415,7 +448,7 @@ class AKShareDataProvider:
             self._load_realtime_quotes()
             return True
         except Exception as e:
-            print(f"[AKShare] Realtime update failed: {e}", flush=True)
+            self._alert(f"[AKShare] 实时行情更新失败: {e}")
             return False
 
     def get_hs300_klines(self, days: int = 120) -> list[DailyKline]:
@@ -460,6 +493,8 @@ class AKShareDataProvider:
             if self._last_realtime_update else None
         )
         health["realtime_update_min_interval_sec"] = RATE_LIMITS.get("update_realtime", 60)
+        # 数据告警（P1-4）：最近一次失败原因，None 表示健康
+        health["data_alert"] = self._last_alert
 
         # Calculate time until next allowed update
         if self._last_realtime_update > 0:

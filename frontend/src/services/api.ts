@@ -1,3 +1,5 @@
+import type { IndicesData, IndexKlineData } from '../types'
+
 const API_BASE = '/api';
 
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
@@ -61,7 +63,7 @@ export const api = {
   getPositions: (status?: string) =>
     request<any>(`/positions${status ? `?status=${status}` : ''}`),
   getPortfolioSummary: () => request<any>('/positions/summary'),
-  sellPosition: (positionId: number, data: { sell_price: number; sell_strategy: string }) =>
+  sellPosition: (positionId: number, data: { sell_price: number; sell_strategy: string; sell_action?: string }) =>
     request<any>(`/positions/${positionId}/sell`, {
       method: 'POST',
       body: JSON.stringify(data),
@@ -88,4 +90,26 @@ export const api = {
   getRealtimeQuotes: (codes?: string[]) =>
     request<any>(`/realtime${codes ? `?codes=${codes.join(',')}` : ''}`),
   tickRealtime: () => request<any>('/realtime/tick', { method: 'POST' }),
+
+  // 交易看板 (Market Indices)
+  getIndices: () => request<IndicesData>('/indices'),
+  getIndexKlines: (code: string, days: number = 60) =>
+    request<IndexKlineData>(`/indices/${code}/klines?days=${days}`),
+
+  // 待买入池 (Pending Buy Pool)
+  getPendingPool: (status?: string) =>
+    request<any>(`/pending-pool${status ? `?status=${status}` : ''}`),
+  buyFromPool: (code: string, amount?: number) =>
+    request<any>(`/pending-pool/${code}/buy`, {
+      method: 'POST',
+      body: amount ? JSON.stringify({ amount }) : undefined,
+    }),
+  removeFromPool: (code: string) =>
+    request<any>(`/pending-pool/${code}/remove`, { method: 'POST' }),
+
+  // 回测中心 (Backtest)
+  backtestRun: (body: any) =>
+    request<any>('/backtest/run', { method: 'POST', body: JSON.stringify(body) }),
+  backtestFetchHistory: (body: any) =>
+    request<any>('/backtest/fetch-history', { method: 'POST', body: JSON.stringify(body) }),
 };

@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { Play, ChevronDown, ChevronUp } from 'lucide-react'
 import { api } from '../services/api'
 import type { ScreeningResult, ScreeningSummary } from '../types'
@@ -27,6 +27,22 @@ export default function Screening() {
       setRunning(false)
     }
   }
+
+  // 进入页面即加载「最新一次选股」结果（与运行选股返回同结构，渲染逻辑复用）
+  const loadLatest = async () => {
+    try {
+      const result = await api.getScreeningResults()
+      setResults(result.all_results || [])
+      setSummary(result.summary || null)
+      setRecommendations(result.recommendations || [])
+      setIsEmpty(result.is_empty_signal)
+      setEmptyReason(result.empty_reason || '')
+    } catch (e) {
+      console.error('Load latest screening failed:', e)
+    }
+  }
+
+  useEffect(() => { loadLatest() }, [])
 
   const funnel = summary?.funnel
 
@@ -129,7 +145,7 @@ export default function Screening() {
                     <td className="px-3 py-2 text-right text-gray-600">{r.layer2_score?.toFixed(4)}</td>
                     <td className="px-3 py-2 text-center text-gray-600">{r.layer2_rank}</td>
                     <td className="px-3 py-2 text-center text-gray-600">{r.layer3_theme || '-'}</td>
-                    <td className="px-3 py-2 text-center text-gray-600">{r.layer3_rank || '-'}</td>
+                    <td className="px-3 py-2 text-center text-gray-600">{r.layer3_theme_rank || '-'}</td>
                     <td className="px-3 py-2 text-center">{r.layer4_death_cross ? <span className="badge-danger">是</span> : '-'}</td>
                     <td className="px-3 py-2 text-center">{r.layer4_vol_price_div ? <span className="badge-danger">是</span> : '-'}</td>
                     <td className="px-3 py-2 text-center">{r.layer4_adx_danger ? <span className="badge-danger">是</span> : '-'}</td>
@@ -162,7 +178,7 @@ export default function Screening() {
 
       {!results.length && !running && (
         <div className="card text-center py-12">
-          <p className="text-gray-400">点击"运行选股"开始四层筛选流程</p>
+          <p className="text-gray-400">暂无选股结果，点击"运行选股"开始四层筛选流程</p>
         </div>
       )}
     </div>

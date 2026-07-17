@@ -68,8 +68,18 @@ class Settings(BaseSettings):
     TRADING_END: str = "15:00"
     SCANNER_ENABLED: bool = True              # 启动时自动拉起盘中扫描守护进程
 
+    # ETF pool auto-sync (交易日收盘后自动同步一次)
+    POOL_SYNC_ENABLED: bool = True             # 启动时自动拉起池同步守护进程
+    POOL_SYNC_AFTER: str = "15:30"           # 收盘后触发时刻（等数据落地，默认收盘15:00后半小时）
+
     # Data source
     DATA_SOURCE: str = "akshare"             # "mock" or "akshare"
+
+    # Security (P1-3): 收紧 CORS + 可选 Bearer 鉴权
+    # 受信前端源（逗号分隔）。为空时使用 "*"（仅本地开发，且关闭凭据）。
+    # 一旦设置了 API_TOKEN，CORS 将强制收紧到本白名单，且所有写接口需 Bearer 鉴权。
+    CORS_ALLOWED_ORIGINS: str = "http://localhost:3000,http://localhost:3001"
+    API_TOKEN: str = ""                        # 为空 = 开放模式（本地开发不鉴权）
 
     # Performance — ETF whitelist small pool + persistent K-line cache (real-data mode)
     # 真实数据（akshare）下，全市场 ~1500+ 只 ETF 逐只拉日 K 线会极慢；启用白名单小池后

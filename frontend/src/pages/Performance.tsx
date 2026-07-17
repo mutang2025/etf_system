@@ -12,6 +12,7 @@ interface PerfData {
   monthly: any[]
   strategy_distribution: any[]
   trades: any[]
+  pool_history: any[]   // 待买入池「已卖出」历史记录
 }
 
 const COLORS = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#06b6d4', '#ec4899', '#6366f1']
@@ -28,7 +29,11 @@ export default function Performance() {
   }, [])
 
   if (loading) return <div className="p-8 text-center text-gray-500">加载中...</div>
-  if (!data || data.stats.total_trades === 0) {
+
+  const poolHistory: any[] = data?.pool_history || []
+  const hasTradesData = !!data && data.stats.total_trades > 0
+  const hasAnyData = !!data && (hasTradesData || poolHistory.length > 0)
+  if (!hasAnyData) {
     return (
       <div className="p-6">
         <h2 className="text-xl font-bold text-gray-800 mb-4">绩效看板</h2>
@@ -43,6 +48,9 @@ export default function Performance() {
 
   const { stats, monthly, strategy_distribution, trades } = data
   const hasTrades = stats.total_trades >= 10
+  const avgPoolPnl = poolHistory.length
+    ? poolHistory.reduce((s: number, it: any) => s + (it.pnl_pct || 0), 0) / poolHistory.length
+    : 0
 
   // Prepare cumulative PnL curve data
   const sortedTrades = [...trades].sort((a, b) =>
@@ -65,6 +73,9 @@ export default function Performance() {
         <p className="text-sm text-gray-500 mt-1">策略表现与历史交易分析</p>
       </div>
 
+      {/* 持仓交易相关模块（无成交记录时隐藏） */}
+      {hasTradesData && (
+       <>
       {/* Sample size warning */}
       {!hasTrades && (
         <div className="card border-amber-200 bg-amber-50">
@@ -228,6 +239,54 @@ export default function Performance() {
           </tbody>
         </table>
       </div>
+       </>
+      )}
+
+      {/* 待买入池历史记录 */}
+      {poolHistory.length > 0 && (
+        <div className="card p-0 overflow-x-auto">
+          <div className="px-4 py-3 border-b border-gray-200 flex items-center justify-between">
+            <h3 className="text-sm font-semibold text-gray-700">待买入池 · 卖出历史</h3>
+            <span className="text-xs text-gray-400">
+              {poolHistory.length} 笔 · 平均{avgPoolPnl >= 0 ? '+' : ''}{avgPoolPnl.toFixed(2)}%
+            </span>
+          </div>
+          <table className="w-full text-sm">
+            <thead className="bg-gray-50 border-b border-gray-200">
+              <tr>
+                <th className="px-3 py-2 text-left font-medium text-gray-600">代码</th>
+                <th className="px-3 py-2 text-left font-medium text-gray-600">名称</th>
+                <th className="px-3 py-2 text-right font-medium text-gray-600">入池点位</th>
+                <th className="px-3 py-2 text-right font-medium text-gray-600">卖出点位</th>
+                <th className="px-3 py-2 text-center font-medium text-gray-600">持有</th>
+                <th className="px-3 py-2 text-right font-medium text-gray-600">盈亏</th>
+                <th className="px-3 py-2 text-left font-medium text-gray-600">入池时间</th>
+                <th className="px-3 py-2 text-left font-medium text-gray-600">卖出时间</th>
+              </tr>
+            </thead>
+            <tbody>
+              {poolHistory.slice().reverse().map((it, i) => {
+                const pnl = it.pnl_pct || 0
+                const hold = diffDays(it.enter_time, it.sell_time)
+                return (
+                  <tr key={i} className="border-b border-gray-50 hover:bg-gray-50">
+                    <td className="px-3 py-2 font-mono text-gray-700">{it.etf_code}</td>
+                    <td className="px-3 py-2 text-gray-700">{it.etf_name}</td>
+                    <td className="px-3 py-2 text-right text-gray-600">{it.entry_price?.toFixed(3)}</td>
+                    <td className="px-3 py-2 text-right text-gray-600">{it.sell_price?.toFixed(3)}</td>
+                    <td className="px-3 py-2 text-center text-gray-600">{hold != null ? `${hold}天` : '-'}</td>
+                    <td className={`px-3 py-2 text-right font-medium ${pnl >= 0 ? 'text-red-500' : 'text-green-500'}`}>
+                      {pnl >= 0 ? '+' : ''}{pnl.toFixed(2)}%
+                    </td>
+                    <td className="px-3 py-2 text-gray-400 text-xs">{it.enter_time || '-'}</td>
+                    <td className="px-3 py-2 text-gray-400 text-xs">{it.sell_time || '-'}</td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   )
 }
@@ -235,6 +294,14 @@ export default function Performance() {
 function round(num: number, decimals: number) {
   const factor = Math.pow(10, decimals)
   return Math.round(num * factor) / factor
+}
+
+function diffDays(a?: string, b?: string): number | null {
+  if (!a || !b) return null
+  const ta = new Date(a.replace(' ', 'T')).getTime()
+  const tb = new Date(b.replace(' ', 'T')).getTime()
+  if (isNaN(ta) || isNaN(tb)) return null
+  return Math.max(0, Math.round((tb - ta) / 86400000))
 }
 
 function MetricCard({ title, value, subtitle, icon, color }: { title: string; value: string; subtitle?: string; icon: React.ReactNode; color: string }) {

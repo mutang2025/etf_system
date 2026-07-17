@@ -1,12 +1,14 @@
 """SQLite database repository for persisting ETF system data."""
 
 import json
+import math
 import sqlite3
 from datetime import datetime
 from typing import Optional
 from config import settings
 from src.domain.entities import ETF, DailyKline, Position
 from src.infrastructure.data_provider_factory import get_data_provider
+from src.infrastructure.timeutil import now_cst
 
 
 class DatabaseRepository:
@@ -23,7 +25,7 @@ class DatabaseRepository:
         K-lines are fetched on demand by the screening engine and cached by the provider.
         """
         etfs = self.mock.get_etf_pool()
-        today = datetime.now().strftime("%Y-%m-%d")
+        today = now_cst().strftime("%Y-%m-%d")
         added = 0
         updated = 0
 
@@ -72,7 +74,12 @@ class DatabaseRepository:
         return {"added": added, "updated": updated, "total": total}
 
     def get_etf_pool(self, status: Optional[str] = None, etf_type: Optional[str] = None) -> list[dict]:
-        """Get ETF pool from database with optional filters."""
+        """Get ETF pool from database with optional filters.
+
+        Enriches each row with the live daily change % (change_pct) from the
+        real-time quote cache (mock or akshare provider). Falls back to None
+        when no quote is available (e.g. excluded/bond ETFs).
+        """
         query = "SELECT * FROM etf_pool WHERE 1=1"
         params = []
         if status:
@@ -83,7 +90,17 @@ class DatabaseRepository:
             params.append(etf_type)
         query += " ORDER BY avg_amount_20d DESC"
         rows = self.conn.execute(query, params).fetchall()
-        return [dict(r) for r in rows]
+        result = []
+        for r in rows:
+            d = dict(r)
+            rt = self.mock.get_realtime_quote(d["code"])
+            d["change_pct"] = (
+                round(float(rt["change_pct"]), 2)
+                if rt and rt.get("change_pct") is not None
+                else None
+            )
+            result.append(d)
+        return result
 
     def get_etf(self, code: str) -> Optional[dict]:
         """Get a single ETF by code."""
@@ -135,9 +152,34 @@ class DatabaseRepository:
         """, (select_date,)).fetchall()
         return [dict(r) for r in rows]
 
+    def save_screening_run(self, select_date: str, funnel: dict) -> None:
+        """Persist the full-pipeline funnel snapshot for a screening run."""
+        self.conn.execute("""
+            INSERT OR REPLACE INTO screening_runs
+                (select_date, pool_total, layer1, layer2, layer3, layer4, final)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (
+            select_date,
+            int(funnel.get("pool_total", 0)),
+            int(funnel.get("layer1", 0)),
+            int(funnel.get("layer2", 0)),
+            int(funnel.get("layer3", 0)),
+            int(funnel.get("layer4", 0)),
+            int(funnel.get("final", 0)),
+        ))
+        self.conn.commit()
+
+    def get_screening_run(self, select_date: str) -> Optional[dict]:
+        """Get the persisted funnel snapshot for a date, or None."""
+        row = self.conn.execute(
+            "SELECT * FROM screening_runs WHERE select_date = ?", (select_date,)
+        ).fetchone()
+        return dict(row) if row else None
+
     def save_signal(self, signal: dict) -> str:
         """Save a signal to database. Returns signal_id."""
         signal_id = signal.get("signal_id") or self._gen_signal_id(signal.get("signal_type", "buy"))
+        trigger_time = signal.get("trigger_time") or now_cst().strftime("%Y-%m-%d %H:%M:%S")
         self.conn.execute("""
             INSERT INTO signals (signal_id, signal_type, etf_code, etf_name, trigger_time,
                 trigger_details, price, change_pct, suggested_amount, factor_summary,
@@ -145,7 +187,7 @@ class DatabaseRepository:
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             signal_id, signal.get("signal_type"), signal.get("etf_code"),
-            signal.get("etf_name"), signal.get("trigger_time"),
+            signal.get("etf_name"), trigger_time,
             json.dumps(signal.get("trigger_details", {}), ensure_ascii=False),
             signal.get("price"), signal.get("change_pct"),
             signal.get("suggested_amount"),
@@ -182,7 +224,7 @@ class DatabaseRepository:
 
         Used to de-duplicate sell signals emitted by the realtime daemon.
         """
-        today = datetime.now().strftime("%Y-%m-%d")
+        today = now_cst().strftime("%Y-%m-%d")
         row = self.conn.execute("""
             SELECT 1 FROM signals
             WHERE signal_type='sell' AND etf_code=? AND sell_strategy=? AND status='pending'
@@ -192,8 +234,12 @@ class DatabaseRepository:
         return row is not None
 
     def update_signal_status(self, signal_id: str, status: str,
-                              extra: Optional[dict] = None) -> bool:
-        """Update signal status (confirmed/skipped/executed)."""
+                              extra: Optional[dict] = None,
+                              commit: bool = True) -> bool:
+        """Update signal status (confirmed/skipped/executed).
+
+        commit=False 时交由调用方统一提交（用于建仓事务）。
+        """
         if extra:
             sets = ", ".join([f"{k}=?" for k in extra.keys()])
             vals = list(extra.values()) + [status, signal_id]
@@ -206,11 +252,15 @@ class DatabaseRepository:
                 "UPDATE signals SET status=?, updated_at=datetime('now','localtime') WHERE signal_id=?",
                 (status, signal_id)
             )
-        self.conn.commit()
+        if commit:
+            self.conn.commit()
         return True
 
-    def save_position(self, pos: dict) -> int:
-        """Save a new position. Returns position ID."""
+    def save_position(self, pos: dict, commit: bool = True) -> int:
+        """Save a new position. Returns position ID.
+
+        commit=False 时交由调用方统一提交（用于建仓事务）。
+        """
         cursor = self.conn.execute("""
             INSERT INTO positions (etf_code, etf_name, buy_signal_id, buy_date, buy_price,
                 buy_amount, buy_shares, current_price, current_value, pnl_amount, pnl_pct,
@@ -223,8 +273,17 @@ class DatabaseRepository:
             pos.get("current_value", pos["buy_amount"]),
             0, 0, 0, int(pos.get("is_trend_stock", False)), "holding"
         ))
-        self.conn.commit()
+        if commit:
+            self.conn.commit()
         return cursor.lastrowid
+
+    def has_open_position(self, etf_code: str) -> bool:
+        """是否存在同一 ETF 的持仓中（holding）记录。用于防止重复开仓。"""
+        row = self.conn.execute(
+            "SELECT 1 FROM positions WHERE etf_code=? AND status='holding' LIMIT 1",
+            (etf_code,)
+        ).fetchone()
+        return row is not None
 
     def get_positions(self, status: Optional[str] = None) -> list[dict]:
         """Get positions with optional status filter."""
@@ -244,8 +303,11 @@ class DatabaseRepository:
     def update_position_pnl(self, pos_id: int, current_price: float,
                             current_value: float, pnl_amount: float,
                             pnl_pct: float, hold_days: int,
-                            is_trend_stock: bool) -> None:
-        """Update position with latest PnL data."""
+                            is_trend_stock: bool, commit: bool = True) -> None:
+        """Update position with latest PnL data.
+
+        commit=False 时交由调用方统一提交（用于建仓事务）。
+        """
         self.conn.execute("""
             UPDATE positions SET current_price=?, current_value=?, pnl_amount=?,
                 pnl_pct=?, hold_days=?, is_trend_stock=?,
@@ -253,11 +315,15 @@ class DatabaseRepository:
             WHERE id=?
         """, (current_price, current_value, pnl_amount, pnl_pct, hold_days,
               int(is_trend_stock), pos_id))
-        self.conn.commit()
+        if commit:
+            self.conn.commit()
 
     def close_position(self, pos_id: int, sell_price: float, sell_date: str,
-                       sell_strategy: str) -> dict:
-        """Close a position. Returns closed position data."""
+                       sell_strategy: str, commit: bool = True) -> dict:
+        """Close a position. Returns closed position data.
+
+        commit=False 时交由调用方统一提交（用于平仓事务）。
+        """
         pos = self.conn.execute("SELECT * FROM positions WHERE id=?", (pos_id,)).fetchone()
         if not pos:
             return {}
@@ -271,15 +337,159 @@ class DatabaseRepository:
                 updated_at=datetime('now','localtime')
             WHERE id=?
         """, (sell_date, sell_price, sell_pnl_amount, sell_pnl_pct, sell_strategy, pos_id))
-        self.conn.commit()
+        if commit:
+            self.conn.commit()
 
         return {**pos, "sell_price": sell_price, "sell_date": sell_date,
                 "sell_pnl_amount": sell_pnl_amount, "sell_pnl_pct": sell_pnl_pct,
                 "sell_strategy": sell_strategy}
 
+    def partial_sell_position(self, pos_id: int, sell_price: float, ratio: float,
+                               sell_date: str, sell_strategy: str,
+                               current_price: Optional[float] = None,
+                               commit: bool = True) -> dict:
+        """Sell a fraction (``ratio`` of shares) of a HOLD position.
+
+        Unlike ``close_position`` (which clears the whole row and sets
+        status='sold'), this keeps the position open (status stays
+        'holding') and only reduces shares / cost basis proportionally,
+        realizing PnL on the sold slice. This is what makes
+        ``REDUCE_*`` sell actions actually *execute* instead of being
+        recorded-and-ignored.
+
+        Returns the updated (still-open) position dict, or ``{}`` if the
+        position is missing or the computed share count to sell is zero.
+        If ``ratio`` would sell the entire position, it degrades to a
+        full ``close_position``.
+        """
+        pos = self.conn.execute("SELECT * FROM positions WHERE id=?", (pos_id,)).fetchone()
+        if not pos:
+            return {}
+        pos = dict(pos)
+        buy_price = pos["buy_price"]
+        buy_shares = pos["buy_shares"]
+
+        shares_to_sell = int(math.floor(buy_shares * ratio))
+        if shares_to_sell <= 0:
+            return {}
+
+        remaining = buy_shares - shares_to_sell
+        if remaining <= 0:
+            # 比例过大 → 退化为清仓，保持语义一致
+            return self.close_position(pos_id, sell_price, sell_date, sell_strategy, commit)
+
+        realized_amount = sell_price * shares_to_sell
+        realized_pnl_amount = (sell_price - buy_price) * shares_to_sell
+        realized_pnl_pct = (sell_price / buy_price - 1) * 100 if buy_price else 0
+
+        new_buy_amount = buy_price * remaining
+        new_current_price = current_price if current_price is not None else sell_price
+        new_current_value = new_current_price * remaining
+
+        self.conn.execute("""
+            UPDATE positions SET buy_amount=?, buy_shares=?, current_price=?,
+                current_value=?, updated_at=datetime('now','localtime')
+            WHERE id=?
+        """, (new_buy_amount, remaining, new_current_price, new_current_value, pos_id))
+        if commit:
+            self.conn.commit()
+
+        return {**pos, "shares_to_sell": shares_to_sell,
+                "remaining_shares": remaining,
+                "realized_amount": round(realized_amount, 2),
+                "realized_pnl_amount": round(realized_pnl_amount, 2),
+                "realized_pnl_pct": round(realized_pnl_pct, 2),
+                "sell_price": sell_price, "sell_date": sell_date,
+                "sell_strategy": sell_strategy}
+
+    def mark_sell_signal_executed(self, etf_code: str, sell_action: str,
+                                  realized_pnl_amount: float,
+                                  realized_pnl_pct: float,
+                                  commit: bool = True) -> None:
+        """Mark the pending REDUCE sell signal for an ETF+action as executed.
+
+        Matches on ``sell_action`` (the reduce action actually executed, e.g.
+        ``REDUCE_50``) rather than ``sell_strategy`` (the Chinese strategy
+        category). This keeps the UI contract (English action) and the signal
+        stored by the sell engine (English action after the enum fix) aligned,
+        so the pending signal is truly consumed instead of lingering as pending.
+        """
+        self.conn.execute("""
+            UPDATE signals SET status='executed',
+                pnl_amount=?, pnl_pct=?,
+                updated_at=datetime('now','localtime')
+            WHERE etf_code=? AND sell_action=? AND status='pending'
+        """, (round(realized_pnl_amount, 2), round(realized_pnl_pct, 2),
+              etf_code, sell_action))
+        if commit:
+            self.conn.commit()
+
     def get_closed_positions(self) -> list[dict]:
         """Get all closed (sold) positions for performance stats."""
         return self.get_positions(status="sold")
+
+    # ---------- Pending Buy Pool ----------
+    def get_pool_row(self, etf_code: str) -> Optional[dict]:
+        """Get a single pending-buy-pool row by ETF code (or None)."""
+        row = self.conn.execute(
+            "SELECT * FROM pending_buy_pool WHERE etf_code=?", (etf_code,)
+        ).fetchone()
+        return dict(row) if row else None
+
+    def get_pending_pool(self, status: Optional[str] = None) -> list[dict]:
+        """Get pending-buy-pool rows, optionally filtered by status."""
+        q = "SELECT * FROM pending_buy_pool WHERE 1=1"
+        p: list = []
+        if status:
+            q += " AND status=?"
+            p.append(status)
+        q += " ORDER BY enter_time DESC"
+        return [dict(r) for r in self.conn.execute(q, p).fetchall()]
+
+    def add_to_pool(self, etf_code: str, etf_name: str,
+                    entry_price: float, enter_time: str) -> bool:
+        """Auto-add an ETF to the pending-buy pool.
+
+        Returns False if a row already exists (incl. a 'sold' blacklist row),
+        so ETFs marked sold by the sell-scan won't re-enter until manually removed.
+        """
+        if self.get_pool_row(etf_code):
+            return False
+        self.conn.execute(
+            "INSERT INTO pending_buy_pool (etf_code, etf_name, entry_price, enter_time, status) "
+            "VALUES (?, ?, ?, ?, 'watching')",
+            (etf_code, etf_name, entry_price, enter_time),
+        )
+        self.conn.commit()
+        return True
+
+    def mark_pool_sold(self, etf_code: str, sell_price: float,
+                        sell_time: str, pnl_pct: float) -> bool:
+        """Mark a pool item as sold by the sell-scan (keeps row until manual remove)."""
+        if not self.get_pool_row(etf_code):
+            return False
+        self.conn.execute(
+            "UPDATE pending_buy_pool SET status='sold', sell_price=?, sell_time=?, "
+            "pnl_pct=?, updated_at=datetime('now','localtime') WHERE etf_code=?",
+            (sell_price, sell_time, pnl_pct, etf_code),
+        )
+        self.conn.commit()
+        return True
+
+    def remove_from_pool(self, etf_code: str) -> bool:
+        """Manual remove from pool (watching or sold)."""
+        cur = self.conn.execute(
+            "DELETE FROM pending_buy_pool WHERE etf_code=?", (etf_code,)
+        )
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def get_pool_sold_codes(self) -> set:
+        """Codes currently blacklisted (marked sold) in the pool."""
+        rows = self.conn.execute(
+            "SELECT etf_code FROM pending_buy_pool WHERE status='sold'"
+        ).fetchall()
+        return {r["etf_code"] for r in rows}
 
     def get_strategy_params(self) -> list[dict]:
         """Get all strategy parameters."""
@@ -294,7 +504,12 @@ class DatabaseRepository:
         return row["param_value"] if row else None
 
     def set_param(self, key: str, value: str, group: str, desc: str = "") -> None:
-        """Set a parameter value, logging the change."""
+        """Set a parameter value, logging the change.
+
+        写入 strategy_params 表后，同步回写到内存中的 config.settings 单例，
+        使 buy/sell/screening 引擎在后续运行中立即采用新值（修 P0-1）。
+        因子权重/选股类参数变更会使当日推荐缓存失效，下一轮扫描自动重算。
+        """
         old = self.get_param(key)
         if old != value:
             self.conn.execute("""
@@ -307,6 +522,47 @@ class DatabaseRepository:
             ON CONFLICT(param_key) DO UPDATE SET param_value=?, updated_at=datetime('now','localtime')
         """, (key, value, group, desc, value))
         self.conn.commit()
+        # 关键修复：把参数同步到引擎实际读取的 config.settings 单例（带类型强转）
+        self._apply_param_to_settings(key, value)
+        # 因子权重/选股类参数影响当日推荐结果，立即使缓存失效以触发重算
+        if group in ("screening", "factor"):
+            self._invalidate_screening_cache()
+
+    def _apply_param_to_settings(self, key: str, value: str) -> None:
+        """Push a DB strategy param into the live ``config.settings`` singleton.
+
+        引擎（buy/sell/screening）运行时读取 ``config.settings`` 而非数据库，
+        因此仅写库不会让调参生效；这里把参数同步到内存单例并做类型强转。
+        """
+        attr = key.upper()
+        if not hasattr(settings, attr):
+            return
+        current = getattr(settings, attr)
+        try:
+            if isinstance(current, bool):
+                new_val = str(value).strip().lower() in ("1", "true", "yes", "on")
+            elif isinstance(current, int):
+                new_val = int(round(float(value)))
+            elif isinstance(current, float):
+                new_val = float(value)
+            else:
+                new_val = value
+        except (ValueError, TypeError):
+            return
+        setattr(settings, attr, new_val)
+
+    def _invalidate_screening_cache(self) -> None:
+        """Flush cached today-recommendations so the next scan picks up new params."""
+        try:
+            from src.screening.screening_engine import get_screening
+            get_screening().invalidate_cache()
+        except Exception:
+            pass
+
+    def load_params_into_settings(self) -> None:
+        """Load all strategy_params rows into the live config.settings (call once at startup)."""
+        for p in self.get_strategy_params():
+            self._apply_param_to_settings(p["param_key"], p["param_value"])
 
     def init_default_params(self) -> None:
         """Initialize default strategy parameters in database."""
@@ -350,7 +606,7 @@ class DatabaseRepository:
     def _gen_signal_id(self, signal_type: str) -> str:
         """Generate a unique signal ID."""
         prefix = "BUY" if signal_type == "buy" else "SELL" if signal_type == "sell" else "EMPTY"
-        today = datetime.now().strftime("%Y%m%d")
+        today = now_cst().strftime("%Y%m%d")
         count = self.conn.execute(
             "SELECT COUNT(*) as c FROM signals WHERE signal_id LIKE ?",
             (f"{prefix}-{today}-%",)

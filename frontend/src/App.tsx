@@ -1,5 +1,5 @@
 import { Routes, Route, NavLink } from 'react-router-dom'
-import { LayoutDashboard, Database, Filter, Bell, Wallet, Settings, TrendingUp, Play, Pause, Zap } from 'lucide-react'
+import { LayoutDashboard, Database, Filter, Bell, Wallet, Settings, TrendingUp, Play, Pause, Zap, BarChart3, ShoppingCart, LineChart } from 'lucide-react'
 import Dashboard from './pages/Dashboard'
 import ETFPool from './pages/ETFPool'
 import Screening from './pages/Screening'
@@ -7,16 +7,22 @@ import Signals from './pages/Signals'
 import Positions from './pages/Positions'
 import Strategy from './pages/Strategy'
 import Performance from './pages/Performance'
+import TradingBoard from './pages/TradingBoard'
+import PendingBuyPool from './pages/PendingBuyPool'
+import Backtest from './pages/Backtest'
 import { useScanner } from './services/scannerContext'
 
 const navItems = [
-  { path: '/', label: '看板', icon: LayoutDashboard },
+  { path: '/', label: '总览', icon: LayoutDashboard },
   { path: '/etf-pool', label: 'ETF池管理', icon: Database },
   { path: '/screening', label: '四层选股', icon: Filter },
   { path: '/signals', label: '信号中心', icon: Bell },
   { path: '/positions', label: '持仓看板', icon: Wallet },
   { path: '/strategy', label: '策略设置', icon: Settings },
   { path: '/performance', label: '绩效看板', icon: TrendingUp },
+  { path: '/trading-board', label: '交易看板', icon: BarChart3 },
+  { path: '/pending-pool', label: '待买入池', icon: ShoppingCart },
+  { path: '/backtest', label: '回测中心', icon: LineChart },
 ]
 
 function LiveBar() {
@@ -124,6 +130,9 @@ export default function App() {
           <Route path="/positions" element={<Positions />} />
           <Route path="/strategy" element={<Strategy />} />
           <Route path="/performance" element={<Performance />} />
+          <Route path="/trading-board" element={<TradingBoard />} />
+          <Route path="/pending-pool" element={<PendingBuyPool />} />
+          <Route path="/backtest" element={<Backtest />} />
         </Routes>
       </main>
     </div>

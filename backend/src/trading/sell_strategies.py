@@ -16,8 +16,12 @@ import numpy as np
 
 from src.domain.entities import SellSignal, Position
 from src.domain.enums import SellStrategyType, SellAction
-from src.indicators.technical import IndicatorCalculator, sma, is_uptrend_arrangement
 from src.infrastructure.data_provider_factory import get_data_provider
+from src.infrastructure.indicator_cache import (
+    get_cached_indicators,
+    DEFAULT_INDICATOR_DAYS,
+)
+from src.infrastructure.timeutil import now_cst
 from config import settings
 
 
@@ -48,17 +52,13 @@ class SellStrategyEngine:
         pnl_pct = (current_price / buy_price - 1) * 100 if buy_price else 0
         pnl_amount = (current_price - buy_price) * buy_shares
 
-        # Get indicators
-        klines = self.mock.get_klines(etf_code, 120)
-        indicators = {}
-        if klines and len(klines) >= 30:
-            calc = IndicatorCalculator(klines)
-            indicators = calc.get_all_indicators()
+        # Get indicators (cached — recomputed only when a new daily bar lands)
+        indicators = get_cached_indicators(self.mock, etf_code, DEFAULT_INDICATOR_DAYS)
 
         # Get realtime
         rt = self.mock.get_realtime_quote(etf_code)
         today_change = rt["change_pct"] if rt else 0
-        current_time = datetime.now()
+        current_time = now_cst()
 
         # Check all strategies in priority order (highest first)
         # Each returns (triggered, detail, action)

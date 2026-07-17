@@ -28,7 +28,7 @@ export default function Strategy() {
     setParams(result.data)
     // Initialize editing values
     const edits: Record<string, string> = {}
-    Object.values(result.data).flat().forEach(p => {
+    Object.values(result.data as Record<string, StrategyParam[]>).flat().forEach(p => {
       edits[p.param_key] = p.param_value
     })
     setEditing(edits)
