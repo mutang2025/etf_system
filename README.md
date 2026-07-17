@@ -19,6 +19,8 @@
 - [数据库设计](#数据库设计)
 - [配置参数](#配置参数)
 - [前端页面](#前端页面)
+- [回测框架](#回测框架)
+- [K 线缓存与初始化脚本](#k-线缓存与初始化脚本)
 - [扩展方向](#扩展方向)
 
 ---
@@ -37,7 +39,8 @@ ETF池(1500+) → 四层漏斗选股 → 每日推荐(2只) → 买入信号扫�
 - **三条件买入信号**：MA5 回踩 + 主力资金异动 + 量能放大，附带 10 秒防抖机制
 - **七级卖出策略**：紧急熔断(P100) → 高开砸盘(P90) → 危险信号(P85) → 趋势分析(P80) → 止盈止损(P75) → 冲高回落(P70) → 强制减仓(P65)
 - **AKShare 实时数据**：接入东方财富/新浪行情，配备频率限制器 + 断路器保护
-- **可视化看板**：7 个功能页面覆盖选股、信号、持仓、策略、绩效全流程
+- **历史回测框架**：单标的 / 组合全市场空跑，复用四层漏斗为信号源，支持叠加实盘卖出纪律与基准对比
+- **可视化看板**：10 个功能页面（含交易看板 / 待买池 / 回测中心）覆盖选股、信号、持仓、策略、绩效全流程
 
 ---
 
@@ -65,12 +68,17 @@ ETF池(1500+) → 四层漏斗选股 → 每日推荐(2只) → 买入信号扫�
 ```
 etf_system/
 ├── backend/
-│   ├── main.py                             # FastAPI 入口，CORS/路由/静态文件
+│   ├── main.py                             # FastAPI 入口，CORS/路由/静态文件托管
 │   ├── config.py                           # Pydantic Settings 全局配置
 │   ├── database.py                         # SQLite 初始化（WAL/外键/超时）
-│   ├── requirements.txt                    # Python 依赖
-│   ├── data/etf.db                         # SQLite 数据库文件
-│   ├── logs/server.log                     # 应用日志
+│   ├── requirements.txt                    # Python 依赖（含 akshare）
+│   ├── requirements-dev.txt                # 测试依赖（pytest）
+│   ├── deploy.py                           # 一键远程部署脚本（paramiko）
+│   ├── start.sh / start.bat               # 生产一键启动（构建 + 托管前端）
+│   ├── data/                              # SQLite + K 线缓存（kline_cache/，gitignored）
+│   ├── logs/                              # 应用日志
+│   ├── scripts/
+│   │   └── init_kline_cache.py            # 一次性初始化 K 线历史缓存（真实 akshare）
 │   └── src/
 │       ├── domain/
 │       │   ├── entities.py                 # 业务实体（ETF/Position/Signal等）
@@ -82,15 +90,26 @@ etf_system/
 │       │   ├── mock_data_provider.py       # Mock 数据生成器（开发/测试用）
 │       │   ├── data_provider_factory.py    # 数据源工厂（mock/akshare 切换）
 │       │   ├── database_repo.py            # 数据库操作层（9张表 CRUD）
-│       │   └── rate_limiter.py             # 频率限制器 + 断路器
+│       │   ├── rate_limiter.py             # 频率限制器 + 断路器
+│       │   ├── kline_cache.py             # K 线本地缓存读写
+│       │   ├── indicator_cache.py          # 指标缓存
+│       │   └── market_indices.py          # 指数行情 + 市场宽度
 │       ├── presentation/
 │       │   └── routes.py                   # REST API 端点（20+ 接口）
 │       ├── screening/
 │       │   └── screening_engine.py         # 四层选股漏斗引擎
-│       └── trading/
-│           ├── buy_signal.py               # 三条件买入信号检测
-│           ├── sell_strategies.py          # 七级优先级卖出策略
-│           └── position_manager.py         # 持仓生命周期管理
+│       ├── trading/
+│       │   ├── buy_signal.py               # 三条件买入信号检测
+│       │   ├── sell_strategies.py          # 七级优先级卖出策略
+│       │   ├── position_manager.py         # 持仓生命周期管理
+│       │   └── scan_tasks.py              # 信号/卖出扫描任务
+│       ├── backtest/                        # 历史回测框架
+│       │   ├── data_source.py              # K 线历史读取 + 落盘(ensure_history)
+│       │   ├── engine.py                   # 单标的 + 组合层回测引擎
+│       │   ├── sell_discipline.py          # 7 条卖出纪律（复用 technical 纯函数）
+│       │   └── api.py                     # 回测 REST 接口
+│       ├── realtime_scanner.py             # 交易时段实时扫描守护
+│       └── pool_sync_scheduler.py         # ETF 池同步调度
 └── frontend/
     ├── index.html                          # HTML 入口
     ├── package.json                        # Node.js 依赖
@@ -99,7 +118,7 @@ etf_system/
     ├── tsconfig.json                       # TypeScript 配置
     └── src/
         ├── main.tsx                        # React 入口
-        ├── App.tsx                         # 主布局 + 路由（7页面）
+        ├── App.tsx                         # 主布局 + 路由（10 页面）
         ├── index.css                       # 全局样式 + Tailwind 指令
         ├── pages/
         │   ├── Dashboard.tsx               # 交易看板总览
@@ -108,7 +127,10 @@ etf_system/
         │   ├── Signals.tsx                 # 买卖信号中心
         │   ├── Positions.tsx               # 持仓管理与盈亏
         │   ├── Strategy.tsx                # 策略参数配置
-        │   └── Performance.tsx             # 绩效分析与归因
+        │   ├── Performance.tsx             # 绩效分析与归因
+│       │   ├── TradingBoard.tsx            # 交易看板（指数 + 市场宽度）
+│       │   ├── PendingBuyPool.tsx         # 待买池（候选标的）
+│       │   └── Backtest.tsx               # 回测中心
         ├── services/
         │   └── api.ts                      # API 客户端封装
         └── types/
@@ -181,6 +203,18 @@ DATA_SOURCE=akshare uvicorn main:app
 # 使用 Mock 模拟数据
 DATA_SOURCE=mock uvicorn main:app
 ```
+
+### 克隆后初始化历史缓存（回测 / 离线分析需要）
+
+K 线历史缓存目录 `backend/data/kline_cache/` 已被 `.gitignore` 忽略，**新 clone 不含任何历史**。运行回测前需先拉取：
+
+```bash
+cd backend
+python scripts/init_kline_cache.py            # 白名单 100 只 ≈ 5 年（推荐，几分钟）
+# 或 python scripts/init_kline_cache.py --universe full   # 全市场，极慢
+```
+
+实时选股（screening）走按需抓取，不依赖该缓存；仅回测 / 组合回测需要它。详见 [K 线缓存与初始化脚本](#k-线缓存与初始化脚本)。
 
 ---
 
@@ -521,6 +555,13 @@ CLOSED（正常）──连续失败达阈值──→ OPEN（熔断，快速失
 | GET | `/api/health/data-source` | 数据源状态、断路器、缓存统计 |
 | POST | `/api/health/circuit-breaker/reset` | 手动重置所有断路器 |
 
+### 回测
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| POST | `/api/backtest/run` | 单标的 / 组合回测（mode=single\|portfolio，universe=whitelist\|full，discipline 开关） |
+| POST | `/api/backtest/fetch-history` | 预拉取宇宙历史 K 线并落本地缓存 |
+
 ---
 
 ## 数据库设计
@@ -625,7 +666,7 @@ row_factory = sqlite3.Row   # 字典式访问
 
 ## 前端页面
 
-系统包含 7 个功能页面，左侧边栏导航：
+系统包含 10 个功能页面，左侧边栏导航：
 
 | 页面 | 路径 | 功能 |
 |------|------|------|
@@ -636,6 +677,58 @@ row_factory = sqlite3.Row   # 字典式访问
 | **持仓看板** | `/positions` | 持仓/已平仓切换、实时盈亏、趋势股标识、手动卖出 |
 | **策略设置** | `/strategy` | 三套预设、因子权重校验、26 项参数分组编辑 |
 | **绩效看板** | `/performance` | 胜率/盈亏比、累计盈亏曲线、月度柱状图、策略分布饼图、交易明细 |
+| **交易看板** | `/trading-board` | 主要指数报价 + 市场宽度 + K 线联动 |
+| **待买池** | `/pending-pool` | 候选买入标的池 |
+| **回测中心** | `/backtest` | 参数面板 + 纪律开关 + 权益曲线（策略 vs 基准） |
+
+---
+
+## 回测框架
+
+位于 `backend/src/backtest/`，是对「一天才 1 个样本」的实盘验证的补充：用 5 年真实历史 K 线**空跑**策略，秒级得到业绩报告。零数据库写入，纯只读分析。
+
+### 模块结构
+
+| 文件 | 职责 |
+|------|------|
+| `data_source.py` | `load_klines_from_store()` 读本地全量历史；`ensure_history()` 检查缓存 → 缺失抓取 → 落盘（断点续拉） |
+| `engine.py` | `BacktestEngine.run_single()` 单标的（信号 + 撮合 + 指标）；`run_portfolio_backtest()` 组合层（每日跑漏斗 → 等权买入新进/卖出掉出，守 T+1/手续费/滑点；基准 = 同宇宙等权买入持有）；`BacktestRequest`（含 `discipline` 开关） |
+| `sell_discipline.py` | 复用 `indicators/technical.py` 纯函数 + `config.settings` 阈值，7 条纪律（止损/止盈/紧急熔断/趋势破位/高开砸盘/冲高回落/强制减仓）；`historical_sell_check()` 返回 `SellDecision` |
+| `api.py` | `POST /api/backtest/run`（mode=single\|portfolio，universe=whitelist\|full，discipline 下传）；`POST /api/backtest/fetch-history`（预拉历史） |
+
+### 撮合规则
+
+- 手续费 `fee_rate`（默认万三单边）、滑点 `slippage`（默认 0.1%）
+- T+1：买入当日不可卖
+- 冷却期 `SELL_COOLDOWN_DAYS=5`：纪律全平后 N 个交易日内不回买（防止「刚止损又买回」，否则纪律形同虚设）
+
+### 前端：回测中心（`/backtest`）
+
+参数面板（模式/宇宙/标的/起止/年限预设/初始资金/手续费/滑点/预拉取/运行）+ 纪律开关（默认开）+ 纪律触发统计 + recharts 双线权益曲线（策略 vs 基准）。
+
+### 真实验证结论（重要，给后续调优指路）
+
+白名单 100 只、近 1 年组合回测：策略 **-36.7%**（叠加纪律 **-37.7%**） vs 基准（同宇宙等权买入持有） **+9.7%**。
+
+> 差距在**买侧**（四层漏斗持续推荐弱势 ETF），不在卖侧。下一步应调**选股 / 动量阈值**，而非「修卖出纪律」。
+
+---
+
+## K 线缓存与初始化脚本
+
+历史 K 线落盘于 `backend/data/kline_cache/<code>.json`（每标的一个文件，如 `510300_SH.json`）。该目录**已被 `.gitignore` 忽略**——也就是说，一个全新的 clone **没有**任何历史缓存。
+
+回测 / 离线分析依赖全量历史，因此 clone 后（或在远程服务器上）需先跑一次性初始化：
+
+```bash
+cd backend
+python scripts/init_kline_cache.py                      # 默认：白名单 100 只，约 5 年历史（推荐）
+python scripts/init_kline_cache.py --universe full      # 全市场 ~1549 只（极慢，慎用）
+python scripts/init_kline_cache.py --codes 510300.SH,159915.SZ
+python scripts/init_kline_cache.py --lookback-days 250  # 只近 1 年
+```
+
+脚本复用 `ensure_history()`：本地已落盘的 code 自动跳过，**可断点续拉**；强制 `DATA_SOURCE=akshare` 避免 `.env` 误设 mock 拉到假数据；抓取受 provider 内部限频 + 熔断保护。
 
 ---
 
@@ -646,7 +739,7 @@ row_factory = sqlite3.Row   # 字典式访问
 | 数据源 | Mock + AKShare 双源 | 接入 Tushare/Wind/Bloomberg，WebSocket 实时推送 |
 | 选股模型 | 规则引擎 + 固定权重 | 机器学习因子模型，动态权重，情绪分析 |
 | 交易执行 | 手动确认 | 对接券商 API 自动下单，模拟盘模式 |
-| 回测框架 | 无 | 历史数据回测，参数寻优，蒙特卡洛模拟 |
+| 回测框架 | **已实现** | 单标的 + 组合全市场回测，复用四层漏斗为信号源，叠加实盘卖出纪律，基准对比（见上「回测框架」节） |
 | 风控指标 | 基础盈亏统计 | Sharpe/Sortino/最大回撤，基准对比，因子归因 |
 | 用户系统 | 单用户无鉴权 | 多用户、角色权限、操作审计 |
 | 通知推送 | 无 | 企业微信/钉钉/Telegram 信号推送 |
