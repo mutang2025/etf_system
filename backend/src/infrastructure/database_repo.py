@@ -73,12 +73,21 @@ class DatabaseRepository:
 
         return {"added": added, "updated": updated, "total": total}
 
-    def get_etf_pool(self, status: Optional[str] = None, etf_type: Optional[str] = None) -> list[dict]:
+    def get_etf_pool(self, status: Optional[str] = None, etf_type: Optional[str] = None,
+                      code: Optional[str] = None, name: Optional[str] = None,
+                      theme: Optional[str] = None) -> list[dict]:
         """Get ETF pool from database with optional filters.
 
         Enriches each row with the live daily change % (change_pct) from the
         real-time quote cache (mock or akshare provider). Falls back to None
         when no quote is available (e.g. excluded/bond ETFs).
+
+        Filters:
+          status   - exact match
+          etf_type - exact match (A股 / 跨境)
+          code     - partial match (LIKE %code%)
+          name     - partial match (LIKE %name%)
+          theme    - exact match
         """
         query = "SELECT * FROM etf_pool WHERE 1=1"
         params = []
@@ -88,6 +97,15 @@ class DatabaseRepository:
         if etf_type:
             query += " AND etf_type = ?"
             params.append(etf_type)
+        if code:
+            query += " AND code LIKE ?"
+            params.append(f"%{code}%")
+        if name:
+            query += " AND name LIKE ?"
+            params.append(f"%{name}%")
+        if theme:
+            query += " AND theme = ?"
+            params.append(theme)
         query += " ORDER BY avg_amount_20d DESC"
         rows = self.conn.execute(query, params).fetchall()
         result = []
@@ -101,6 +119,13 @@ class DatabaseRepository:
             )
             result.append(d)
         return result
+
+    def get_etf_themes(self) -> list[str]:
+        """Return distinct non-empty themes for the filter dropdown."""
+        rows = self.conn.execute(
+            "SELECT DISTINCT theme FROM etf_pool WHERE theme IS NOT NULL AND theme != '' ORDER BY theme"
+        ).fetchall()
+        return [r[0] for r in rows]
 
     def get_etf(self, code: str) -> Optional[dict]:
         """Get a single ETF by code."""
@@ -142,6 +167,16 @@ class DatabaseRepository:
             int(result["layer4_adx_danger"]), int(result["layer4_bb_risk"]),
             int(result["layer4_passed"]), int(result["final_recommended"])
         ))
+        self.conn.commit()
+
+    def clear_selection_results(self, select_date: str) -> None:
+        """Clear all saved selection results for a date before storing a new run.
+
+        This guarantees that refreshing the page after re-running the screening
+        shows exactly the latest run, without stale ETF codes from previous runs
+        on the same date lingering in the DB (the table has UNIQUE(date, code)).
+        """
+        self.conn.execute("DELETE FROM selection_results WHERE select_date = ?", (select_date,))
         self.conn.commit()
 
     def get_selection_results(self, select_date: str) -> list[dict]:
@@ -201,12 +236,20 @@ class DatabaseRepository:
 
     def get_signals(self, signal_type: Optional[str] = None, status: Optional[str] = None,
                      limit: int = 50) -> list[dict]:
-        """Get signals with optional filters."""
+        """Get signals with optional filters.
+
+        默认不包含 'empty' 类型的市场空仓占位信号——该状态由选股页/
+        仪表盘通过 is_empty_signal / empty_reason 实时展示，不应作为一条
+        信号卡片出现在信号中心列表里。
+        """
         query = "SELECT * FROM signals WHERE 1=1"
         params = []
         if signal_type:
             query += " AND signal_type = ?"
             params.append(signal_type)
+        else:
+            # 默认隐藏历史遗留的无意义空仓占位
+            query += " AND signal_type != 'empty'"
         if status:
             query += " AND status = ?"
             params.append(status)
@@ -214,6 +257,15 @@ class DatabaseRepository:
         params.append(limit)
         rows = self.conn.execute(query, params).fetchall()
         return [dict(r) for r in rows]
+
+    def clear_empty_signals(self) -> int:
+        """删除历史遗留的 'empty' 空仓占位信号（它们不应出现在信号列表）。
+
+        Returns the number of rows removed.
+        """
+        cursor = self.conn.execute("DELETE FROM signals WHERE signal_type = 'empty'")
+        self.conn.commit()
+        return cursor.rowcount
 
     def get_pending_signals(self, signal_type: str = "buy") -> list[dict]:
         """Get pending signals of a type."""

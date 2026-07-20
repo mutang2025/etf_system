@@ -25,4 +25,26 @@ export default defineConfig({
       },
     },
   },
+  // 本地 preview 也需要 API 代理，否则点"运行选股"请求打不到后端
+  preview: {
+    port: 4173,
+    proxy: {
+      '/api': {
+        target: 'http://localhost:8001',
+        changeOrigin: true,
+        configure: (proxy) => {
+          proxy.on('proxyRes', (proxyRes, _req, res) => {
+            const ct = (proxyRes.headers['content-type'] as string) || ''
+            if (ct.includes('text/event-stream')) {
+              proxyRes.headers['cache-control'] = 'no-cache, no-transform'
+              proxyRes.headers['connection'] = 'keep-alive'
+              if (typeof (res as any).flushHeaders === 'function') {
+                ;(res as any).flushHeaders()
+              }
+            }
+          })
+        },
+      },
+    },
+  },
 })

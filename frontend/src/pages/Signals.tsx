@@ -102,7 +102,6 @@ export default function Signals() {
           <option value="">全部类型</option>
           <option value="buy">买入</option>
           <option value="sell">卖出</option>
-          <option value="empty">空仓</option>
         </select>
         <select
           value={filterStatus}

@@ -141,12 +141,22 @@ async def get_dashboard():
 async def get_etf_pool(
     status: Optional[str] = Query(None),
     etf_type: Optional[str] = Query(None),
+    code: Optional[str] = Query(None),
+    name: Optional[str] = Query(None),
+    theme: Optional[str] = Query(None),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
 ):
-    """Get ETF pool with filters."""
+    """Get ETF pool with filters.
+
+    status   - exact (active/excluded/blacklist/whitelist)
+    etf_type - exact (A股/跨境)
+    code     - partial match
+    name     - partial match
+    theme    - exact match
+    """
     db = get_db()
-    etfs = db.get_etf_pool(status=status, etf_type=etf_type)
+    etfs = db.get_etf_pool(status=status, etf_type=etf_type, code=code, name=name, theme=theme)
     total = len(etfs)
     start = (page - 1) * page_size
     end = start + page_size
@@ -156,6 +166,13 @@ async def get_etf_pool(
         "page_size": page_size,
         "data": etfs[start:end],
     }
+
+
+@router.get("/api/etf-pool/themes")
+async def get_etf_themes():
+    """Get distinct themes for the filter dropdown."""
+    db = get_db()
+    return {"themes": db.get_etf_themes()}
 
 @router.get("/api/etf-pool/{code}")
 async def get_etf_detail(code: str):
@@ -215,7 +232,11 @@ async def run_screening():
 
     results = screening.run_full_screening()
 
+    summary = screening.get_screening_summary(results)
+
     # Save results to DB
+    # 同一日期重跑时先清空旧记录，避免旧推荐 ETF 残留导致刷新后出现多余结果
+    db.clear_selection_results(summary["select_date"])
     for r in results:
         result_dict = {
             "select_date": r.select_date,
@@ -238,8 +259,6 @@ async def run_screening():
         }
         db.save_selection_result(result_dict)
 
-    summary = screening.get_screening_summary(results)
-
     # 持久化完整漏斗快照，保证「进入页面读取最新一次」与「点击运行选股」
     # 两条路径展示的漏斗完全一致（run_full_screening 只把 layer3+ 子集入库）
     db.save_screening_run(summary["select_date"], summary["funnel"])
@@ -247,13 +266,28 @@ async def run_screening():
     # 手动重跑选股后使当日推荐缓存失效，下一轮买入扫描将取到最新结果
     screening.invalidate_cache()
 
-    # If empty signal, save it
-    if is_empty:
-        db.save_signal({
-            "signal_type": "empty",
-            "trigger_time": now_cst().strftime("%Y-%m-%d %H:%M:%S"),
-            "status": "pending",
-        })
+    # 今日最终推荐 ETF 自动纳入待买入池（按实时价记录入池点位）
+    # add_to_pool 会自动跳过已存在项（含已卖出的黑名单），避免重复入池
+    recommendations = [r for r in results if r.final_recommended]
+    pool_added, pool_skipped = 0, 0
+    for r in recommendations:
+        rt = mock.get_realtime_quote(r.etf_code)
+        entry_price = rt["price"] if rt else 0.0
+        if entry_price <= 0:
+            pool_skipped += 1
+            continue
+        ok = db.add_to_pool(
+            r.etf_code, r.etf_name, entry_price,
+            now_cst().strftime("%Y-%m-%d %H:%M:%S"),
+        )
+        if ok:
+            pool_added += 1
+        else:
+            pool_skipped += 1
+
+    # 市场空仓状态仅通过返回体的 is_empty_signal / empty_reason 透传给
+    # 选股页/仪表盘实时展示，不再作为一条「信号」写入 signals 表——
+    # 否则信号中心会堆满无意义的「空仓」卡片，淹没真正的买卖信号。
 
     # Serialize results
     data = []
@@ -283,6 +317,8 @@ async def run_screening():
         "empty_reason": reason if is_empty else "",
         "recommendations": [d for d in data if d["final_recommended"]],
         "all_results": data,
+        "pool_added": pool_added,
+        "pool_skipped": pool_skipped,
     }
 
 @router.get("/api/screening/results")

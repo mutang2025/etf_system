@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { RefreshCw, Search, Ban, CheckCircle } from 'lucide-react'
 import { api } from '../services/api'
 import type { ETF } from '../types'
@@ -8,9 +8,34 @@ export default function ETFPool() {
   const [total, setTotal] = useState(0)
   const [page, setPage] = useState(1)
   const [loading, setLoading] = useState(true)
+  const [themes, setThemes] = useState<string[]>([])
+
+  // 四个筛选字段
   const [filterStatus, setFilterStatus] = useState('active')
   const [filterType, setFilterType] = useState('')
-  const [syncing, setSyncing] = useState(false)
+  const [filterCode, setFilterCode] = useState('')   // 代码（模糊）
+  const [filterName, setFilterName] = useState('')   // 名称（模糊）
+  const [filterTheme, setFilterTheme] = useState('')   // 题材（精确）
+
+  // 文本输入防抖：避免每敲一个字就打一次接口
+  const [debouncedCode, setDebouncedCode] = useState('')
+  const [debouncedName, setDebouncedName] = useState('')
+  const firstRender = useRef(true)
+
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedCode(filterCode.trim()), 300)
+    return () => clearTimeout(t)
+  }, [filterCode])
+
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedName(filterName.trim()), 300)
+    return () => clearTimeout(t)
+  }, [filterName])
+
+  // 题材下拉选项
+  useEffect(() => {
+    api.getETFPoolThemes().then(r => setThemes(r.themes || [])).catch(() => {})
+  }, [])
 
   const loadData = async () => {
     setLoading(true)
@@ -18,6 +43,9 @@ export default function ETFPool() {
       const result = await api.getETFPool({
         status: filterStatus || undefined,
         etf_type: filterType || undefined,
+        code: debouncedCode || undefined,
+        name: debouncedName || undefined,
+        theme: filterTheme || undefined,
         page,
         page_size: 20,
       })
@@ -30,21 +58,48 @@ export default function ETFPool() {
     }
   }
 
-  useEffect(() => { loadData() }, [page, filterStatus, filterType])
+  // 任意筛选项变化都重新拉取；文本输入经过防抖后触发
+  useEffect(() => {
+    // 首屏由下方初次加载负责，避免与 mount 重复触发
+    if (firstRender.current) {
+      firstRender.current = false
+      loadData()
+      return
+    }
+    setPage(1)
+    loadData()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filterStatus, filterType, debouncedCode, debouncedName, filterTheme])
+
+  // 翻页（page 变化但不重置筛选）
+  useEffect(() => {
+    if (page === 1) return
+    loadData()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [page])
 
   const handleSync = async () => {
-    setSyncing(true)
+    setLoading(true)
     try {
       await api.syncETFPool()
       await loadData()
     } finally {
-      setSyncing(false)
+      setLoading(false)
     }
   }
 
   const handleStatusChange = async (code: string, status: string) => {
     await api.updateETFStatus(code, status)
     await loadData()
+  }
+
+  const resetFilters = () => {
+    setFilterStatus('active')
+    setFilterType('')
+    setFilterCode('')
+    setFilterName('')
+    setFilterTheme('')
+    setPage(1)
   }
 
   const totalPages = Math.ceil(total / 20)
@@ -54,36 +109,72 @@ export default function ETFPool() {
       <div className="flex items-center justify-between">
         <div>
           <h2 className="text-xl font-bold text-gray-800">ETF池管理</h2>
-          <p className="text-sm text-gray-500 mt-1">共 {total} 只ETF</p>
+          <p className="text-sm text-gray-500 mt-1">共 {total} 只ETF（筛选后）</p>
         </div>
-        <button onClick={handleSync} disabled={syncing} className="btn-primary">
-          <RefreshCw size={16} className={`inline mr-1 ${syncing ? 'animate-spin' : ''}`} />
-          {syncing ? '同步中...' : '同步ETF池'}
+        <button onClick={handleSync} disabled={loading} className="btn-primary">
+          <RefreshCw size={16} className={`inline mr-1 ${loading ? 'animate-spin' : ''}`} />
+          {loading ? '同步中...' : '同步ETF池'}
         </button>
       </div>
 
-      {/* Filters */}
-      <div className="flex items-center gap-3">
-        <select
-          value={filterStatus}
-          onChange={e => { setFilterStatus(e.target.value); setPage(1) }}
-          className="px-3 py-2 border border-gray-300 rounded-lg text-sm bg-white"
-        >
-          <option value="">全部状态</option>
-          <option value="active">活跃</option>
-          <option value="excluded">已排除</option>
-          <option value="blacklist">黑名单</option>
-          <option value="whitelist">白名单</option>
-        </select>
-        <select
-          value={filterType}
-          onChange={e => { setFilterType(e.target.value); setPage(1) }}
-          className="px-3 py-2 border border-gray-300 rounded-lg text-sm bg-white"
-        >
-          <option value="">全部类型</option>
-          <option value="A股">A股</option>
-          <option value="跨境">跨境</option>
-        </select>
+      {/* Filters — 代码 / 名称 / 类型 / 题材 */}
+      <div className="card p-4">
+        <div className="flex flex-wrap items-end gap-3">
+          <div className="flex flex-col gap-1">
+            <label className="text-xs text-gray-500">代码</label>
+            <div className="relative">
+              <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-400" />
+              <input
+                value={filterCode}
+                onChange={e => setFilterCode(e.target.value)}
+                placeholder="模糊匹配代码"
+                className="pl-8 pr-3 py-2 border border-gray-300 rounded-lg text-sm bg-white w-44"
+              />
+            </div>
+          </div>
+          <div className="flex flex-col gap-1">
+            <label className="text-xs text-gray-500">名称</label>
+            <div className="relative">
+              <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-400" />
+              <input
+                value={filterName}
+                onChange={e => setFilterName(e.target.value)}
+                placeholder="模糊匹配名称"
+                className="pl-8 pr-3 py-2 border border-gray-300 rounded-lg text-sm bg-white w-44"
+              />
+            </div>
+          </div>
+          <div className="flex flex-col gap-1">
+            <label className="text-xs text-gray-500">类型</label>
+            <select
+              value={filterType}
+              onChange={e => setFilterType(e.target.value)}
+              className="px-3 py-2 border border-gray-300 rounded-lg text-sm bg-white"
+            >
+              <option value="">全部类型</option>
+              <option value="A股">A股</option>
+              <option value="跨境">跨境</option>
+            </select>
+          </div>
+          <div className="flex flex-col gap-1">
+            <label className="text-xs text-gray-500">题材</label>
+            <select
+              value={filterTheme}
+              onChange={e => setFilterTheme(e.target.value)}
+              className="px-3 py-2 border border-gray-300 rounded-lg text-sm bg-white"
+            >
+              <option value="">全部题材</option>
+              {themes.map(t => (
+                <option key={t} value={t}>{t}</option>
+              ))}
+            </select>
+          </div>
+          {(filterStatus || filterType || filterCode || filterName || filterTheme) && (
+            <button onClick={resetFilters} className="btn-secondary mb-0.5">
+              重置筛选
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Table */}

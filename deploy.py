@@ -57,7 +57,8 @@ def make_tarball():
         "tar", "czf", TARBALL_LOCAL,
         "-C", src,
         "--exclude=node_modules", "--exclude=.git", "--exclude=__pycache__",
-        "--exclude=*.pyc", "--exclude=data/kline_cache", "--exclude=*.log",
+        "--exclude=*.pyc", "--exclude=backend/data", "--exclude=*.log",
+        "--exclude=*.mjs", "--exclude=IMPROVEMENT_ANALYSIS.md",
         ".",
     ]
     r = subprocess.run(cmd, capture_output=True, text=True)
@@ -85,8 +86,10 @@ def main():
 
     # ---- Phase C: 解压 ----
     log("\n[PHASE C] 解压到 %s" % APP_DIR)
-    cmd = ("rm -rf %s && mkdir -p %s && tar xzf %s -C %s && echo EXTRACT_OK && ls %s"
-           % (APP_DIR, APP_DIR, TARBALL_REMOTE, APP_DIR, APP_DIR))
+    # 不解压删除整个目录：保留服务器已有的 backend/data（生产 etf.db / kline 缓存等运行时数据），
+    # 本地 tar 包已排除 backend/data，故只覆盖代码与前端 dist，绝不覆盖生产库。
+    cmd = ("mkdir -p %s && tar xzf %s -C %s && echo EXTRACT_OK && ls %s"
+           % (APP_DIR, TARBALL_REMOTE, APP_DIR, APP_DIR))
     out, err = ssh_run(c, cmd, timeout=120)
     log(out); log(err)
 

@@ -140,3 +140,68 @@ def test_manual_run_screening_invalidates_shared_cache(db):
     assert screening._rec_cache == {}, "运行选股后共享单例缓存应被清空"
     # 守护进程持有的正是这个被清空的单例
     assert get_scanner().screening is screening
+
+
+# ============================ P0-3 ============================
+
+def test_rerun_screening_overwrites_same_day_results(db):
+    """同一日期重跑选股应覆盖旧结果，刷新页面后不应出现上次残留的 ETF。
+
+    背景 bug：selection_results 的 UNIQUE(select_date, etf_code) 导致
+    INSERT OR REPLACE 只替换同 code 行；不同 code 的旧行会残留。
+    修复：run_screening 先 clear_selection_results 再写入。
+    """
+    from src.presentation.routes import get_db
+
+    date = "2026-07-20"
+    db.clear_selection_results(date)
+    # 模拟旧一次跑出的 4 只
+    old_codes = ["159843.SZ", "159977.SZ", "159253.SZ", "159611.SZ"]
+    for code in old_codes:
+        db.save_selection_result({
+            "select_date": date,
+            "etf_code": code,
+            "etf_name": code,
+            "layer1_passed": True,
+            "layer2_score": 0.5,
+            "layer2_rank": 1,
+            "factor_scores": [],
+            "layer3_theme": None,
+            "layer3_theme_rank": 0,
+            "layer3_passed": True,
+            "layer4_death_cross": False,
+            "layer4_vol_price_div": False,
+            "layer4_adx_danger": False,
+            "layer4_bb_risk": False,
+            "layer4_passed": True,
+            "final_recommended": True,
+        })
+    assert len(db.get_selection_results(date)) == 4
+
+    # 模拟新一次跑出的 2 只（与旧交集 2 只，新无 2 只）
+    new_codes = ["159843.SZ", "159977.SZ"]
+    db.clear_selection_results(date)
+    for code in new_codes:
+        db.save_selection_result({
+            "select_date": date,
+            "etf_code": code,
+            "etf_name": code,
+            "layer1_passed": True,
+            "layer2_score": 0.4,
+            "layer2_rank": 1,
+            "factor_scores": [],
+            "layer3_theme": None,
+            "layer3_theme_rank": 0,
+            "layer3_passed": True,
+            "layer4_death_cross": False,
+            "layer4_vol_price_div": False,
+            "layer4_adx_danger": False,
+            "layer4_bb_risk": False,
+            "layer4_passed": True,
+            "final_recommended": True,
+        })
+
+    rows = db.get_selection_results(date)
+    assert len(rows) == 2, f"重跑后应只剩新结果的 2 只，实际 {len(rows)} 只"
+    assert {r["etf_code"] for r in rows} == set(new_codes)
+
