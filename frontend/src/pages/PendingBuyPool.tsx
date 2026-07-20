@@ -6,6 +6,7 @@ import {
 import { api } from '../services/api'
 import type { PendingPoolItem } from '../types'
 import { useLiveRefresh, LivePill } from '../services/scannerContext'
+import ETFKlineModal from '../components/ETFKlineModal'
 
 const STATUS_LABEL: Record<string, string> = {
   watching: '待买入',
@@ -28,6 +29,7 @@ export default function PendingBuyPool() {
   const [loading, setLoading] = useState(false)
   const [busy, setBusy] = useState<string | null>(null) // code 正在操作
   const [toast, setToast] = useState<{ type: 'success' | 'error'; msg: string } | null>(null)
+  const [detailCode, setDetailCode] = useState<string | null>(null)
 
   const loadData = useCallback(async () => {
     setLoading(true)
@@ -130,6 +132,7 @@ export default function PendingBuyPool() {
             <tr className="bg-gray-50 text-gray-600">
               <th className="px-4 py-3 text-left font-medium">代码 / 名称</th>
               <th className="px-4 py-3 text-right font-medium">入池点位</th>
+              <th className="px-4 py-3 text-right font-medium">综合得分</th>
               <th className="px-4 py-3 text-right font-medium">现价</th>
               <th className="px-4 py-3 text-right font-medium">当日涨跌幅</th>
               <th className="px-4 py-3 text-center font-medium">状态</th>
@@ -138,11 +141,11 @@ export default function PendingBuyPool() {
             </tr>
           </thead>
           <tbody>
-            {loading && (
-              <tr><td colSpan={7} className="text-center py-8 text-gray-400">加载中...</td></tr>
-            )}
-            {!loading && items.length === 0 && (
-              <tr><td colSpan={7} className="text-center py-10 text-gray-400">
+              {loading && (
+                <tr><td colSpan={8} className="text-center py-8 text-gray-400">加载中...</td></tr>
+              )}
+              {!loading && items.length === 0 && (
+                <tr><td colSpan={8} className="text-center py-10 text-gray-400">
                 <Layers className="mx-auto mb-2 text-gray-300" size={28} />
                 {filter === 'watching'
                   ? '暂无待买入标的 — 运行买入扫描后信号会自动入池'
@@ -154,7 +157,8 @@ export default function PendingBuyPool() {
               return (
                 <tr
                   key={it.etf_code}
-                  className={`border-t border-gray-100 ${isSold ? 'bg-gray-50/60 opacity-75' : 'hover:bg-gray-50'}`}
+                  onClick={() => setDetailCode(it.etf_code)}
+                  className={`cursor-pointer border-t border-gray-100 ${isSold ? 'bg-gray-50/60 opacity-75' : 'hover:bg-gray-50'}`}
                 >
                   <td className="px-4 py-3">
                     <div className="font-medium text-gray-800">{it.etf_code}</div>
@@ -165,6 +169,9 @@ export default function PendingBuyPool() {
                   </td>
                   <td className="px-4 py-3 text-right font-mono text-gray-700">
                     {it.entry_price?.toFixed(3)}
+                  </td>
+                  <td className="px-4 py-3 text-right font-mono font-semibold text-purple-600">
+                    {it.score != null ? it.score.toFixed(2) : '-'}
                   </td>
                   <td className="px-4 py-3 text-right font-mono text-gray-700">
                     {it.current_price != null ? it.current_price.toFixed(3) : '-'}
@@ -192,7 +199,7 @@ export default function PendingBuyPool() {
                       {!isSold && (
                         <button
                           disabled={busy === it.etf_code}
-                          onClick={() => handleBuy(it.etf_code, it.etf_name)}
+                          onClick={(e) => { e.stopPropagation(); handleBuy(it.etf_code, it.etf_name) }}
                           className="flex items-center gap-1 px-2.5 py-1.5 text-xs rounded-lg bg-blue-500 text-white hover:bg-blue-600 disabled:opacity-50"
                         >
                           {busy === it.etf_code ? <RefreshCw size={13} className="animate-spin" /> : <ArrowRight size={13} />}
@@ -201,7 +208,7 @@ export default function PendingBuyPool() {
                       )}
                       <button
                         disabled={busy === it.etf_code}
-                        onClick={() => handleRemove(it.etf_code, it.etf_name)}
+                        onClick={(e) => { e.stopPropagation(); handleRemove(it.etf_code, it.etf_name) }}
                         className="flex items-center gap-1 px-2.5 py-1.5 text-xs rounded-lg border border-gray-200 text-gray-500 hover:bg-gray-100 disabled:opacity-50"
                       >
                         <Trash2 size={13} /> 移出
@@ -219,6 +226,9 @@ export default function PendingBuyPool() {
         说明：买入信号产生后自动进入本池并记录入池点位；卖出扫描会同步覆盖池子（以入池点位为成本，命中同持仓卖出信号即标记卖出、记录卖出点位与盈亏、状态置「已卖出」），已卖出项不再纳入买入扫描。
         从池子「买入」将按实时价建仓并自动移出；「移出」为人工操作，可移除待买入或已卖出项。
       </p>
+      {detailCode && (
+        <ETFKlineModal code={detailCode} onClose={() => setDetailCode(null)} />
+      )}
     </div>
   )
 }

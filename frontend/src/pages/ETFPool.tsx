@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react'
 import { RefreshCw, Search, Ban, CheckCircle } from 'lucide-react'
 import { api } from '../services/api'
 import type { ETF } from '../types'
+import ETFKlineModal from '../components/ETFKlineModal'
 
 export default function ETFPool() {
   const [etfs, setEtfs] = useState<ETF[]>([])
@@ -16,6 +17,8 @@ export default function ETFPool() {
   const [filterCode, setFilterCode] = useState('')   // 代码（模糊）
   const [filterName, setFilterName] = useState('')   // 名称（模糊）
   const [filterTheme, setFilterTheme] = useState('')   // 题材（精确）
+  const [detailCode, setDetailCode] = useState<string | null>(null)
+  const [detailName, setDetailName] = useState('')
 
   // 文本输入防抖：避免每敲一个字就打一次接口
   const [debouncedCode, setDebouncedCode] = useState('')
@@ -199,7 +202,11 @@ export default function ETFPool() {
             ) : etfs.length === 0 ? (
               <tr><td colSpan={9} className="text-center py-8 text-gray-400">无数据</td></tr>
             ) : etfs.map(etf => (
-              <tr key={etf.code} className="border-b border-gray-50 hover:bg-gray-50">
+              <tr
+                key={etf.code}
+                onClick={() => { setDetailCode(etf.code); setDetailName(etf.name) }}
+                className="cursor-pointer border-b border-gray-50 hover:bg-gray-50"
+              >
                 <td className="px-4 py-3 font-mono text-gray-700">{etf.code}</td>
                 <td className="px-4 py-3 text-gray-700">{etf.name}</td>
                 <td className="px-4 py-3">
@@ -222,12 +229,12 @@ export default function ETFPool() {
                 </td>
                 <td className="px-4 py-3 text-center">
                   {etf.status !== 'blacklist' ? (
-                    <button onClick={() => handleStatusChange(etf.code, 'blacklist')}
+                    <button onClick={(e) => { e.stopPropagation(); handleStatusChange(etf.code, 'blacklist') }}
                       className="text-xs text-red-500 hover:underline inline-flex items-center gap-1">
                       <Ban size={12} /> 拉黑
                     </button>
                   ) : (
-                    <button onClick={() => handleStatusChange(etf.code, 'active')}
+                    <button onClick={(e) => { e.stopPropagation(); handleStatusChange(etf.code, 'active') }}
                       className="text-xs text-green-500 hover:underline inline-flex items-center gap-1">
                       <CheckCircle size={12} /> 恢复
                     </button>
@@ -248,6 +255,14 @@ export default function ETFPool() {
           <button onClick={() => setPage(p => Math.min(totalPages, p + 1))} disabled={page === totalPages}
             className="btn-secondary disabled:opacity-50">下一页</button>
         </div>
+      )}
+      {/* ETF K线弹框 */}
+      {detailCode && (
+        <ETFKlineModal
+          code={detailCode}
+          name={detailName}
+          onClose={() => setDetailCode(null)}
+        />
       )}
     </div>
   )

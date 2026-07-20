@@ -175,7 +175,7 @@ async def get_etf_themes():
     return {"themes": db.get_etf_themes()}
 
 @router.get("/api/etf-pool/{code}")
-async def get_etf_detail(code: str):
+async def get_etf_detail(code: str, days: int = Query(30, ge=5, le=250)):
     """Get single ETF detail with K-line data."""
     db = get_db()
     mock = get_data_provider()
@@ -183,16 +183,16 @@ async def get_etf_detail(code: str):
     if not etf:
         raise HTTPException(404, "ETF not found")
     # Try DB first, fallback to provider (K-lines not synced for all ETFs with AKShare)
-    klines = db.get_klines_from_db(code, 30)
+    klines = db.get_klines_from_db(code, days)
     if not klines:
         # Fetch from provider on demand
-        provider_klines = mock.get_klines(code, 30)
+        provider_klines = mock.get_klines(code, days)
         klines = [{"etf_code": k.etf_code, "trade_date": k.trade_date,
                    "open": k.open, "high": k.high, "low": k.low,
                    "close": k.close, "volume": k.volume, "amount": k.amount}
                   for k in provider_klines]
     rt = mock.get_realtime_quote(code)
-    return {"etf": etf, "klines": klines[-30:], "realtime": rt}
+    return {"etf": etf, "klines": klines[-days:], "realtime": rt}
 
 @router.put("/api/etf-pool/{code}/status")
 async def update_etf_status(code: str, body: ETFStatusUpdate):
@@ -279,6 +279,7 @@ async def run_screening():
         ok = db.add_to_pool(
             r.etf_code, r.etf_name, entry_price,
             now_cst().strftime("%Y-%m-%d %H:%M:%S"),
+            score=float(r.layer2_score),
         )
         if ok:
             pool_added += 1

@@ -134,6 +134,7 @@ export interface PendingPoolItem {
   sell_price?: number | null;  // 标记卖出时记录
   sell_time?: string | null;
   pnl_pct?: number | null;      // (sell_price/entry_price - 1) * 100，仅百分比
+  score?: number | null;         // 四层选股综合得分（layer2_score），入池时记录
   // 后端实时富集
   current_price?: number | null;
   change_pct?: number | null;

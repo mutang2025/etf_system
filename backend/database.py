@@ -225,3 +225,11 @@ def _create_tables(conn: sqlite3.Connection) -> None:
     );
     """)
     conn.commit()
+
+    # ---- Schema migrations for existing databases ----
+    # 待买入池增加「综合得分」字段（四层选股入池时记录，前端展示）
+    _cols = [c["name"] for c in conn.execute(
+        "PRAGMA table_info(pending_buy_pool)").fetchall()]
+    if "score" not in _cols:
+        conn.execute("ALTER TABLE pending_buy_pool ADD COLUMN score REAL")
+        conn.commit()

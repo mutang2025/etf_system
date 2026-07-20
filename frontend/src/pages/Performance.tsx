@@ -127,7 +127,7 @@ export default function Performance() {
                 <Tooltip formatter={(value: any) => `¥${value.toFixed(2)}`} />
                 <Bar dataKey="pnl" name="盈亏">
                   {monthly.map((m, i) => (
-                    <Cell key={i} fill={m.pnl >= 0 ? '#10b981' : '#ef4444'} />
+                    <Cell key={i} fill={m.pnl >= 0 ? '#059669' : '#dc2626'} />
                   ))}
                 </Bar>
               </BarChart>

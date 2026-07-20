@@ -4,15 +4,15 @@ import {
   ArrowUpRight, ArrowDownRight, Gauge,
 } from 'lucide-react'
 import {
-  AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip,
+  BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
   ResponsiveContainer, ReferenceLine,
 } from 'recharts'
 import { api } from '../services/api'
 import type { IndicesData, IndexQuote, IndexKlineData, IndexKline } from '../types'
 
 // 中国 A 股配色：涨=红，跌=绿
-const UP = '#ef4444'
-const DOWN = '#10b981'
+const UP = '#dc2626'
+const DOWN = '#059669'
 
 function toneColor(pct: number): string {
   return pct >= 0 ? UP : DOWN
@@ -28,6 +28,75 @@ function fmtVol(volume: number): string {
 }
 function fmtAmt(amount: number): string {
   return `${fmtNum(amount, 0)} 亿`
+}
+
+// recharts 没有原生蜡烛图，用 Bar + custom shape 实现
+// 闭包捕获当前 Y 轴范围，把 open/high/low/close 映射为像素坐标
+type CandlePayload = { date: string; open: number; high: number; low: number; close: number }
+function makeCandleShape(yMin: number, yMax: number) {
+  return function CandleShape(props: any) {
+    const { x, y, width, height, payload } = props as {
+      x: number; y: number; width: number; height: number; payload: CandlePayload
+    }
+    const range = yMax - yMin
+    if (!height || range <= 0 || payload.high <= yMin) {
+      return <line x1={x + width / 2} y1={y} x2={x + width / 2} y2={y + 1} stroke={UP} />
+    }
+
+    // 从 recharts 给的这根“high 到 yMin”的柱子反推出整个图表的像素映射
+    const chartHeight = (height * range) / (payload.high - yMin)
+    const chartTop = y - chartHeight * (yMax - payload.high) / range
+    const yFor = (price: number) => chartTop + chartHeight * (yMax - price) / range
+
+    const isUp = payload.close >= payload.open
+    const color = isUp ? UP : DOWN
+    const bodyTop = Math.max(payload.open, payload.close)
+    const bodyBottom = Math.min(payload.open, payload.close)
+
+    const cx = x + width / 2
+    const yHigh = yFor(payload.high)
+    const yLow = yFor(payload.low)
+    const yBodyTop = yFor(bodyTop)
+    const yBodyBottom = yFor(bodyBottom)
+    const bodyHeight = Math.max(yBodyBottom - yBodyTop, 1)
+    const bodyWidth = Math.max(width * 0.6, 1)
+    const bodyX = cx - bodyWidth / 2
+
+    return (
+      <g>
+        {/* 影线 */}
+        <line x1={cx} y1={yHigh} x2={cx} y2={yLow} stroke={color} strokeWidth={1} />
+        {/* 实体 */}
+        <rect
+          x={bodyX} y={yBodyTop} width={bodyWidth} height={bodyHeight}
+          fill={color} stroke={color} strokeWidth={1} rx={1}
+        />
+      </g>
+    )
+  }
+}
+
+function CandleTooltip({ active, payload, label }: any) {
+  if (!active || !payload || !payload.length) return null
+  const d = payload[0].payload as CandlePayload
+  const isUp = d.close >= d.open
+  return (
+    <div className="bg-white border border-gray-200 rounded-lg shadow-sm px-3 py-2 text-xs">
+      <div className="text-gray-500 mb-1">{label}</div>
+      <div className="grid grid-cols-2 gap-x-4 gap-y-0.5">
+        <span className="text-gray-400">开</span>
+        <span className="font-mono text-right">{fmtNum(d.open)}</span>
+        <span className="text-gray-400">高</span>
+        <span className="font-mono text-right">{fmtNum(d.high)}</span>
+        <span className="text-gray-400">低</span>
+        <span className="font-mono text-right">{fmtNum(d.low)}</span>
+        <span className="text-gray-400">收</span>
+        <span className={`font-mono text-right font-medium ${isUp ? 'text-red-500' : 'text-green-500'}`}>
+          {fmtNum(d.close)}
+        </span>
+      </div>
+    </div>
+  )
 }
 
 const TIMEFRAMES = [
@@ -90,20 +159,31 @@ export default function TradingBoard() {
     [data, selected],
   )
 
-  const chartColor = useMemo(() => {
-    if (!klines || klines.klines.length < 2) return UP
-    const first = klines.klines[0].close
-    const last = klines.klines[klines.klines.length - 1].close
-    return last >= first ? UP : DOWN
-  }, [klines])
-
-  const chartData = useMemo(
+  // 用于 K 线蜡烛图的 OHLC 数据（保持时间正序）
+  const candles = useMemo(
     () => (klines?.klines ?? []).map((k: IndexKline) => ({
       date: k.trade_date.slice(5), // MM-DD
+      open: k.open,
+      high: k.high,
+      low: k.low,
       close: k.close,
     })),
     [klines],
   )
+
+  // Y 轴范围：取所有 K 线的最低/最高，留 2% 边距，避免蜡烛贴边
+  const { yMin, yMax } = useMemo(() => {
+    if (candles.length === 0) return { yMin: 0, yMax: 1 }
+    const lows = candles.map((d) => d.low)
+    const highs = candles.map((d) => d.high)
+    const min = Math.min(...lows)
+    const max = Math.max(...highs)
+    const pad = Math.max((max - min) * 0.02, 0.01)
+    return { yMin: min - pad, yMax: max + pad }
+  }, [candles])
+
+  // 根据当前 Y 轴范围生成蜡烛图 custom shape（减少 React 重新创建开销）
+  const CandleShape = useMemo(() => makeCandleShape(yMin, yMax), [yMin, yMax])
 
   const breadth = data?.breadth
   const breadthTotal = breadth ? breadth.up + breadth.down + breadth.flat : 1
@@ -240,34 +320,25 @@ export default function TradingBoard() {
           </div>
         </div>
 
-        {chartData.length > 0 ? (
+        {candles.length > 0 ? (
           <ResponsiveContainer width="100%" height={300}>
-            <AreaChart data={chartData} margin={{ top: 10, right: 12, left: 0, bottom: 0 }}>
-              <defs>
-                <linearGradient id="idxFill" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="0%" stopColor={chartColor} stopOpacity={0.35} />
-                  <stop offset="100%" stopColor={chartColor} stopOpacity={0.02} />
-                </linearGradient>
-              </defs>
+            <BarChart data={candles} margin={{ top: 10, right: 12, left: 0, bottom: 0 }}>
               <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
               <XAxis
                 dataKey="date" tick={{ fontSize: 11, fill: '#94a3b8' }}
                 minTickGap={28} axisLine={false} tickLine={false}
               />
               <YAxis
-                domain={['auto', 'auto']} tick={{ fontSize: 11, fill: '#94a3b8' }}
+                domain={[yMin, yMax]} tick={{ fontSize: 11, fill: '#94a3b8' }}
                 width={48} axisLine={false} tickLine={false}
+                tickFormatter={(v: number) => fmtNum(v, 0)}
               />
-              <Tooltip
-                contentStyle={{ fontSize: 12, borderRadius: 8, border: '1px solid #e2e8f0' }}
-                formatter={(v: number) => [fmtNum(v), '收盘']}
-              />
+              <Tooltip content={<CandleTooltip />} cursor={{ fill: '#f1f5f9' }} />
               <ReferenceLine y={selectedQuote?.prev_close} stroke="#94a3b8" strokeDasharray="4 4" />
-              <Area
-                type="monotone" dataKey="close" stroke={chartColor} strokeWidth={2}
-                fill="url(#idxFill)" dot={false} activeDot={{ r: 3 }}
-              />
-            </AreaChart>
+              {/* dataKey=high, baseValue=yMin：让 recharts 把每根柱子的 y/height 落在统一坐标系里，
+                  实际绘制逻辑完全由 custom shape 接管，渲染影线+实体 */}
+              <Bar dataKey="high" shape={CandleShape} />
+            </BarChart>
           </ResponsiveContainer>
         ) : (
           <div className="text-center text-gray-400 py-12">暂无K线数据</div>

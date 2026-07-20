@@ -499,18 +499,21 @@ class DatabaseRepository:
         return [dict(r) for r in self.conn.execute(q, p).fetchall()]
 
     def add_to_pool(self, etf_code: str, etf_name: str,
-                    entry_price: float, enter_time: str) -> bool:
+                    entry_price: float, enter_time: str,
+                    score: Optional[float] = None) -> bool:
         """Auto-add an ETF to the pending-buy pool.
 
         Returns False if a row already exists (incl. a 'sold' blacklist row),
         so ETFs marked sold by the sell-scan won't re-enter until manually removed.
+
+        score: 四层选股的综合得分（layer2_score），入池时记录，缺省为 None。
         """
         if self.get_pool_row(etf_code):
             return False
         self.conn.execute(
-            "INSERT INTO pending_buy_pool (etf_code, etf_name, entry_price, enter_time, status) "
-            "VALUES (?, ?, ?, ?, 'watching')",
-            (etf_code, etf_name, entry_price, enter_time),
+            "INSERT INTO pending_buy_pool (etf_code, etf_name, entry_price, enter_time, score, status) "
+            "VALUES (?, ?, ?, ?, ?, 'watching')",
+            (etf_code, etf_name, entry_price, enter_time, score),
         )
         self.conn.commit()
         return True

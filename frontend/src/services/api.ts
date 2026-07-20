@@ -31,7 +31,7 @@ export const api = {
     return request<any>(`/etf-pool?${search}`);
   },
   getETFPoolThemes: () => request<{ themes: string[] }>('/etf-pool/themes'),
-  getETFDetail: (code: string) => request<any>(`/etf-pool/${code}`),
+  getETFDetail: (code: string, days: number = 30) => request<any>(`/etf-pool/${code}?days=${days}`),
   updateETFStatus: (code: string, status: string) =>
     request<any>(`/etf-pool/${code}/status`, {
       method: 'PUT',
