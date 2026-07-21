@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import { RefreshCw, Wallet, TrendingUp, TrendingDown } from 'lucide-react'
 import { api } from '../services/api'
 import type { Position, PortfolioSummary } from '../types'
+import ETFKlineModal from '../components/ETFKlineModal'
 import { useLiveRefresh, LivePill } from '../services/scannerContext'
 
 export default function Positions() {
@@ -12,6 +13,7 @@ export default function Positions() {
   const [sellPrice, setSellPrice] = useState('')
   const [sellStrategy, setSellStrategy] = useState('manual')
   const [tab, setTab] = useState<'holding' | 'sold'>('holding')
+  const [detailCode, setDetailCode] = useState<string | null>(null)
 
   const loadData = async () => {
     setLoading(true)
@@ -146,7 +148,7 @@ export default function Positions() {
                 {tab === 'holding' ? '暂无持仓' : '暂无已平仓记录'}
               </td></tr>
             ) : positions.map(pos => (
-              <tr key={pos.id} className="border-b border-gray-50 hover:bg-gray-50">
+              <tr key={pos.id} className="border-b border-gray-50 hover:bg-gray-50 cursor-pointer" onClick={() => setDetailCode(pos.etf_code)}>
                 <td className="px-3 py-2 font-mono text-gray-700">{pos.etf_code}</td>
                 <td className="px-3 py-2 text-gray-700">{pos.etf_name}</td>
                 <td className="px-3 py-2 text-right text-gray-600">{pos.buy_price?.toFixed(4)}</td>
@@ -183,7 +185,7 @@ export default function Positions() {
                     <span className="badge-gray">{pos.sell_strategy || '-'}</span>
                   </td>
                 )}
-                <td className="px-3 py-2 text-center">
+                <td className="px-3 py-2 text-center" onClick={e => e.stopPropagation()}>
                   {tab === 'holding' && sellingId === pos.id ? (
                     <div className="flex flex-col gap-1">
                       <input
@@ -221,6 +223,10 @@ export default function Positions() {
           </tbody>
         </table>
       </div>
+
+      {detailCode && (
+        <ETFKlineModal code={detailCode} onClose={() => setDetailCode(null)} />
+      )}
     </div>
   )
 }

@@ -72,6 +72,10 @@ class Settings(BaseSettings):
     POOL_SYNC_ENABLED: bool = True             # 启动时自动拉起池同步守护进程
     POOL_SYNC_AFTER: str = "15:30"           # 收盘后触发时刻（等数据落地，默认收盘15:00后半小时）
 
+    # 四层选股自动运行（交易日收盘后自动跑一次四层选股，推荐结果入待买入池）
+    SCREENING_ENABLED: bool = True            # 启动时自动拉起选股调度器
+    SCREENING_AFTER: str = "15:30"          # 收盘后触发时刻（与池同步一致，等当日数据落地）
+
     # Data source
     DATA_SOURCE: str = "akshare"             # "mock" or "akshare"
 

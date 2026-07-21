@@ -20,6 +20,7 @@ from src.presentation.routes import router
 from src.infrastructure.database_repo import DatabaseRepository
 from src.realtime_scanner import get_scanner
 from src.pool_sync_scheduler import get_pool_sync_scheduler
+from src.screening_scheduler import get_screening_scheduler
 
 app = FastAPI(
     title=settings.APP_NAME,
@@ -98,6 +99,14 @@ async def startup_event():
         except Exception as e:
             print(f"[Startup] Failed to start pool sync scheduler: {e}")
 
+    # 启动四层选股定时调度器（交易日收盘后自动跑一次选股并入池）
+    if settings.SCREENING_ENABLED:
+        try:
+            get_screening_scheduler().start()
+            print(f"[Startup] Screening scheduler started (after_close={settings.SCREENING_AFTER})")
+        except Exception as e:
+            print(f"[Startup] Failed to start screening scheduler: {e}")
+
 
 @app.on_event("shutdown")
 async def shutdown_event():
@@ -110,6 +119,11 @@ async def shutdown_event():
     try:
         get_pool_sync_scheduler().stop()
         print("[Shutdown] ETF pool sync scheduler stopped")
+    except Exception:
+        pass
+    try:
+        get_screening_scheduler().stop()
+        print("[Shutdown] Screening scheduler stopped")
     except Exception:
         pass
 
