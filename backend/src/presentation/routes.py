@@ -144,6 +144,8 @@ async def get_etf_pool(
     code: Optional[str] = Query(None),
     name: Optional[str] = Query(None),
     theme: Optional[str] = Query(None),
+    sort_by: Optional[str] = Query(None, description="排序字段，如 change_pct / avg_amount_20d / total_market_cap"),
+    order: str = Query("desc", description="asc 升序 / desc 降序"),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
 ):
@@ -154,9 +156,12 @@ async def get_etf_pool(
     code     - partial match
     name     - partial match
     theme    - exact match
+    sort_by  - sort field (e.g. change_pct)
+    order    - asc / desc
     """
     db = get_db()
-    etfs = db.get_etf_pool(status=status, etf_type=etf_type, code=code, name=name, theme=theme)
+    etfs = db.get_etf_pool(status=status, etf_type=etf_type, code=code, name=name,
+                            theme=theme, sort_by=sort_by, order=order)
     total = len(etfs)
     start = (page - 1) * page_size
     end = start + page_size

@@ -19,13 +19,15 @@ export const api = {
   getDashboard: () => request<any>('/dashboard'),
 
   // ETF Pool
-  getETFPool: (params?: { status?: string; etf_type?: string; code?: string; name?: string; theme?: string; page?: number; page_size?: number }) => {
+  getETFPool: (params?: { status?: string; etf_type?: string; code?: string; name?: string; theme?: string; sort_by?: string; order?: string; page?: number; page_size?: number }) => {
     const search = new URLSearchParams();
     if (params?.status) search.set('status', params.status);
     if (params?.etf_type) search.set('etf_type', params.etf_type);
     if (params?.code) search.set('code', params.code);
     if (params?.name) search.set('name', params.name);
     if (params?.theme) search.set('theme', params.theme);
+    if (params?.sort_by) search.set('sort_by', params.sort_by);
+    if (params?.order) search.set('order', params.order);
     if (params?.page) search.set('page', String(params.page));
     if (params?.page_size) search.set('page_size', String(params.page_size));
     return request<any>(`/etf-pool?${search}`);

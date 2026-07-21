@@ -75,7 +75,8 @@ class DatabaseRepository:
 
     def get_etf_pool(self, status: Optional[str] = None, etf_type: Optional[str] = None,
                       code: Optional[str] = None, name: Optional[str] = None,
-                      theme: Optional[str] = None) -> list[dict]:
+                      theme: Optional[str] = None, sort_by: Optional[str] = None,
+                      order: str = "desc") -> list[dict]:
         """Get ETF pool from database with optional filters.
 
         Enriches each row with the live daily change % (change_pct) from the
@@ -118,6 +119,17 @@ class DatabaseRepository:
                 else None
             )
             result.append(d)
+        # 排序：change_pct 是运行时从实时行情富集的字段，无法用 SQL ORDER BY，
+        # 故统一在 Python 层对富集后的结果排序。None 值始终排在最后。
+        if sort_by:
+            reverse = (order == "desc")
+            result.sort(
+                key=lambda x: (
+                    1 if x.get(sort_by) is None else 0,
+                    x.get(sort_by) if x.get(sort_by) is not None else 0,
+                ),
+                reverse=reverse,
+            )
         return result
 
     def get_etf_themes(self) -> list[str]:

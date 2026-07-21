@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import { RefreshCw, Search, Ban, CheckCircle } from 'lucide-react'
+import { RefreshCw, Search, Ban, CheckCircle, ArrowUp, ArrowDown } from 'lucide-react'
 import { api } from '../services/api'
 import type { ETF } from '../types'
 import ETFKlineModal from '../components/ETFKlineModal'
@@ -19,6 +19,10 @@ export default function ETFPool() {
   const [filterTheme, setFilterTheme] = useState('')   // 题材（精确）
   const [detailCode, setDetailCode] = useState<string | null>(null)
   const [detailName, setDetailName] = useState('')
+
+  // 排序：默认按日涨幅降序（涨幅高的排前面）
+  const [sortBy, setSortBy] = useState('change_pct')
+  const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc')
 
   // 文本输入防抖：避免每敲一个字就打一次接口
   const [debouncedCode, setDebouncedCode] = useState('')
@@ -49,6 +53,8 @@ export default function ETFPool() {
         code: debouncedCode || undefined,
         name: debouncedName || undefined,
         theme: filterTheme || undefined,
+        sort_by: sortBy || undefined,
+        order: sortOrder,
         page,
         page_size: 20,
       })
@@ -72,7 +78,7 @@ export default function ETFPool() {
     setPage(1)
     loadData()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filterStatus, filterType, debouncedCode, debouncedName, filterTheme])
+  }, [filterStatus, filterType, debouncedCode, debouncedName, filterTheme, sortBy, sortOrder])
 
   // 翻页（page 变化但不重置筛选）
   useEffect(() => {
@@ -102,6 +108,17 @@ export default function ETFPool() {
     setFilterCode('')
     setFilterName('')
     setFilterTheme('')
+    setPage(1)
+  }
+
+  // 点击表头切换排序：同一列点击在升/降序间切换，切换列时默认降序
+  const toggleSort = (column: string) => {
+    if (sortBy === column) {
+      setSortOrder(o => (o === 'desc' ? 'asc' : 'desc'))
+    } else {
+      setSortBy(column)
+      setSortOrder('desc')
+    }
     setPage(1)
   }
 
@@ -189,9 +206,45 @@ export default function ETFPool() {
               <th className="px-4 py-3 text-left font-medium text-gray-600">名称</th>
               <th className="px-4 py-3 text-left font-medium text-gray-600">类型</th>
               <th className="px-4 py-3 text-left font-medium text-gray-600">题材</th>
-              <th className="px-4 py-3 text-right font-medium text-gray-600">日均成交额(万)</th>
-              <th className="px-4 py-3 text-right font-medium text-gray-600">总市值(亿)</th>
-              <th className="px-4 py-3 text-right font-medium text-gray-600">日涨幅</th>
+              <th
+                onClick={() => toggleSort('avg_amount_20d')}
+                className="px-4 py-3 text-right font-medium text-gray-600 cursor-pointer select-none hover:text-gray-900 transition-colors"
+              >
+                <span className="inline-flex items-center gap-1 justify-end">
+                  日均成交额(万)
+                  {sortBy === 'avg_amount_20d' ? (
+                    sortOrder === 'desc' ? <ArrowDown size={13} className="text-blue-500" /> : <ArrowUp size={13} className="text-blue-500" />
+                  ) : (
+                    <ArrowDown size={13} className="text-gray-300" />
+                  )}
+                </span>
+              </th>
+              <th
+                onClick={() => toggleSort('total_market_cap')}
+                className="px-4 py-3 text-right font-medium text-gray-600 cursor-pointer select-none hover:text-gray-900 transition-colors"
+              >
+                <span className="inline-flex items-center gap-1 justify-end">
+                  总市值(亿)
+                  {sortBy === 'total_market_cap' ? (
+                    sortOrder === 'desc' ? <ArrowDown size={13} className="text-blue-500" /> : <ArrowUp size={13} className="text-blue-500" />
+                  ) : (
+                    <ArrowDown size={13} className="text-gray-300" />
+                  )}
+                </span>
+              </th>
+              <th
+                onClick={() => toggleSort('change_pct')}
+                className="px-4 py-3 text-right font-medium text-gray-600 cursor-pointer select-none hover:text-gray-900 transition-colors"
+              >
+                <span className="inline-flex items-center gap-1 justify-end">
+                  日涨幅
+                  {sortBy === 'change_pct' ? (
+                    sortOrder === 'desc' ? <ArrowDown size={13} className="text-blue-500" /> : <ArrowUp size={13} className="text-blue-500" />
+                  ) : (
+                    <ArrowDown size={13} className="text-gray-300" />
+                  )}
+                </span>
+              </th>
               <th className="px-4 py-3 text-center font-medium text-gray-600">状态</th>
               <th className="px-4 py-3 text-center font-medium text-gray-600">操作</th>
             </tr>
