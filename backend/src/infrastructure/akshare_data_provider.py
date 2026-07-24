@@ -386,10 +386,16 @@ class AKShareDataProvider:
         2. on-disk ``_kline_store``   (persists across restarts — the perf win)
         3. network fetch from sina    (rate-limited + circuit-breakered), then write back to both
         """
-        # 1) in-process cache
+        # 1) in-process cache — but ONLY if still fresh.
+        # ⚠️ 之前这里直接返回，不做新鲜度检查，导致进程内缓存一旦写入就
+        # 在整个后端进程生命周期内永远返回旧 K 线（直到重启），表现为
+        # 「持仓看板弹框 K 线不更新 / 比 ETF 池陈旧」。
+        # 现在与磁盘缓存用同一套新鲜度口径：最新交易日才认为有效。
         if etf_code in self._kline_cache:
             klines = self._kline_cache[etf_code]
-            return klines[-days:] if days < len(klines) else klines
+            if klines and klines[-1].trade_date >= PersistentKlineStore.latest_trading_day():
+                return klines[-days:] if days < len(klines) else klines
+            # 过期 → 落到磁盘/网络层重新抓取
 
         # 2) persistent on-disk cache (auto-refreshes once per trading day)
         cached = self._kline_store.get(etf_code)

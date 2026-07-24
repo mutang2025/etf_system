@@ -197,7 +197,7 @@ export default function TradingBoard() {
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h2 className="text-xl font-bold text-gray-800 flex items-center gap-2">
-            <BarChart3 size={22} className="text-primary-600" /> 交易看板
+            <BarChart3 size={22} className="text-primary-600" /> 市场看板
             <span className={`inline-flex items-center gap-1 ml-1 align-middle px-2 py-0.5 rounded-full text-[10px] font-medium ${
               data.data_source === 'akshare' ? 'bg-green-50 text-green-700' : 'bg-gray-100 text-gray-500'
             }`}>

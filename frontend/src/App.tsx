@@ -14,13 +14,13 @@ import { useScanner } from './services/scannerContext'
 
 const navItems = [
   { path: '/', label: '总览', icon: LayoutDashboard },
+  { path: '/trading-board', label: '市场看板', icon: BarChart3 },
   { path: '/etf-pool', label: 'ETF池管理', icon: Database },
   { path: '/screening', label: '四层选股', icon: Filter },
   { path: '/signals', label: '信号中心', icon: Bell },
   { path: '/positions', label: '持仓看板', icon: Wallet },
   { path: '/strategy', label: '策略设置', icon: Settings },
   { path: '/performance', label: '绩效看板', icon: TrendingUp },
-  { path: '/trading-board', label: '交易看板', icon: BarChart3 },
   { path: '/pending-pool', label: '待买入池', icon: ShoppingCart },
   { path: '/backtest', label: '回测中心', icon: LineChart },
 ]
