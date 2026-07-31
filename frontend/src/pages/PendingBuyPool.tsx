@@ -23,6 +23,22 @@ function fmtPct(v: number | null | undefined): string {
   return `${v >= 0 ? '+' : ''}${v.toFixed(2)}%`
 }
 
+// 入池后盈亏百分比：(当前价/卖出价 - 入池点位) / 入池点位
+// watching 用实时价、sold 用已记录的 pnl_pct（或卖出价回算），A股红涨绿跌
+function entryPnlPct(it: PendingPoolItem): number | null | undefined {
+  if (it.status === 'sold') {
+    if (it.pnl_pct != null) return it.pnl_pct
+    if (it.sell_price != null && it.entry_price) {
+      return (it.sell_price - it.entry_price) / it.entry_price * 100
+    }
+    return null
+  }
+  if (it.entry_price && it.current_price) {
+    return (it.current_price - it.entry_price) / it.entry_price * 100
+  }
+  return null
+}
+
 export default function PendingBuyPool() {
   const [items, setItems] = useState<PendingPoolItem[]>([])
   const [filter, setFilter] = useState<string>('all') // all | watching | sold
@@ -134,6 +150,7 @@ export default function PendingBuyPool() {
               <th className="px-4 py-3 text-right font-medium">入池点位</th>
               <th className="px-4 py-3 text-right font-medium">综合得分</th>
               <th className="px-4 py-3 text-right font-medium">现价</th>
+              <th className="px-4 py-3 text-right font-medium">入池后盈亏</th>
               <th className="px-4 py-3 text-right font-medium">当日涨跌幅</th>
               <th className="px-4 py-3 text-center font-medium">状态</th>
               <th className="px-4 py-3 text-right font-medium">卖出点位 / 盈亏</th>
@@ -142,10 +159,10 @@ export default function PendingBuyPool() {
           </thead>
           <tbody>
               {loading && (
-                <tr><td colSpan={8} className="text-center py-8 text-gray-400">加载中...</td></tr>
+                <tr><td colSpan={9} className="text-center py-8 text-gray-400">加载中...</td></tr>
               )}
               {!loading && items.length === 0 && (
-                <tr><td colSpan={8} className="text-center py-10 text-gray-400">
+                <tr><td colSpan={9} className="text-center py-10 text-gray-400">
                 <Layers className="mx-auto mb-2 text-gray-300" size={28} />
                 {filter === 'watching'
                   ? '暂无待买入标的 — 运行买入扫描后信号会自动入池'
@@ -175,6 +192,9 @@ export default function PendingBuyPool() {
                   </td>
                   <td className="px-4 py-3 text-right font-mono text-gray-700">
                     {it.current_price != null ? it.current_price.toFixed(3) : '-'}
+                  </td>
+                  <td className={`px-4 py-3 text-right font-mono font-semibold ${pctClass(entryPnlPct(it))}`}>
+                    {fmtPct(entryPnlPct(it))}
                   </td>
                   <td className={`px-4 py-3 text-right font-mono ${pctClass(it.change_pct)}`}>
                     {fmtPct(it.change_pct)}
@@ -224,6 +244,7 @@ export default function PendingBuyPool() {
 
       <p className="mt-4 text-xs text-gray-400 leading-relaxed">
         说明：买入信号产生后自动进入本池并记录入池点位；卖出扫描会同步覆盖池子（以入池点位为成本，命中同持仓卖出信号即标记卖出、记录卖出点位与盈亏、状态置「已卖出」），已卖出项不再纳入买入扫描。
+        「入池后盈亏」= (现价/卖出价 − 入池点位) ÷ 入池点位，待买入项随实时价变动、已卖出项为已实现盈亏。
         从池子「买入」将按实时价建仓并自动移出；「移出」为人工操作，可移除待买入或已卖出项。
       </p>
       {detailCode && (
