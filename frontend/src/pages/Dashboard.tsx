@@ -111,7 +111,7 @@ export default function Dashboard() {
 
         {indices ? (
           <>
-            <div className="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-7 gap-3">
+            <div className="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-8 gap-3">
               {indices.indices.map((idx: IndexQuote) => {
                 const up = idx.change_pct >= 0
                 return (
@@ -122,7 +122,12 @@ export default function Dashboard() {
                     }`}
                   >
                     <div className="flex items-center justify-between gap-1">
-                      <span className="text-xs font-medium text-gray-700 truncate">{idx.name}</span>
+                      <span className="flex items-center gap-1 min-w-0">
+                        <span className="text-xs font-medium text-gray-700 truncate">{idx.name}</span>
+                        {idx.market === 'hk' && (
+                          <span className="shrink-0 text-[9px] font-semibold px-1 py-0.5 rounded bg-orange-100 text-orange-600">港</span>
+                        )}
+                      </span>
                       <span className="text-[9px] text-gray-400 font-mono shrink-0">{idx.code.split('.')[0]}</span>
                     </div>
                     <p className={`text-lg font-bold mt-1 ${up ? 'text-red-500' : 'text-green-500'}`}>

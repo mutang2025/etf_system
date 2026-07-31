@@ -1,7 +1,7 @@
 """交易看板 - 多指数行情数据源。
 
 覆盖指数：
-    上证指数 / 深证成指 / 创业板指 / 科创50 / 沪深300 / 上证50 / 北证50
+    上证指数 / 深证成指 / 创业板指 / 科创50 / 沪深300 / 上证50 / 北证50 / 恒生指数（港股）
 
 数据获取策略（与系统其余部分保持一致）：
 - 若 settings.DATA_SOURCE == "akshare" 且 AKShare 可联网，则拉取新浪指数行情
@@ -32,6 +32,7 @@ INDEX_DEFS = [
     {"code": "000300.SH", "name": "沪深300",  "sina": "sh000300", "base": 3850.0, "color": "#10b981"},
     {"code": "000016.SH", "name": "上证50",   "sina": "sh000016", "base": 2650.0, "color": "#3b82f6"},
     {"code": "899050.BJ", "name": "北证50",   "sina": "bj899050", "base": 1100.0, "color": "#ec4899"},
+    {"code": "HSI.HK",    "name": "恒生指数", "sina": "HSI", "base": 17800.0, "color": "#f97316", "market": "hk"},
 ]
 
 _DEF_BY_CODE = {d["code"]: d for d in INDEX_DEFS}
@@ -186,11 +187,18 @@ class IndexDataProvider:
     def _akshare_index_daily(self, code: str, days: int) -> Optional[list]:
         if not self._ak:
             return None
-        sina = _DEF_BY_CODE.get(code, {}).get("sina")
+        d = _DEF_BY_CODE.get(code)
+        if not d:
+            return None
+        sina = d.get("sina")
         if not sina:
             return None
         try:
-            df = self._ak.stock_zh_index_daily(symbol=sina)
+            # 港股（恒生）走独立新浪日K接口；A股走 stock_zh_index_daily
+            if d.get("market") == "hk":
+                df = self._ak.stock_hk_index_daily_sina(symbol=sina)
+            else:
+                df = self._ak.stock_zh_index_daily(symbol=sina)
             if df is None:
                 return None
             klines: list[dict] = []
@@ -207,39 +215,121 @@ class IndexDataProvider:
         except Exception:
             return None
 
+    def _build_quote(self, d, price, prev, open_, high, low, pct, volume, amount) -> dict:
+        """Assemble a standardized index quote dict."""
+        return {
+            "code": d["code"],
+            "name": d["name"],
+            "color": d["color"],
+            "price": round(price, 2),
+            "prev_close": round(prev, 2),
+            "open": round(open_, 2),
+            "high": round(high, 2),
+            "low": round(low, 2),
+            "change": round(price - prev, 2),
+            "change_pct": round(pct, 2),
+            "volume": int(volume),
+            "amount": round(amount, 1),
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+
+    def _akshare_hk_quote(self, d: dict) -> Optional[dict]:
+        """Realtime Hang Seng Index quote.
+
+        Primary source: Sina HK index spot (stock_hk_index_spot_sina) — reliable
+        and returns the full HK index list (filter by name). Fallback: daily
+        K-line via stock_hk_index_daily_sina("HSI") so the board still shows a
+        valid HSI quote even if the realtime spot API is unstable/offline.
+        """
+        if not self._ak:
+            return None
+        # 1) Sina HK index realtime spot
+        try:
+            df = self._ak.stock_hk_index_spot_sina()
+            if df is not None and "名称" in getattr(df, "columns", []):
+                row = df[df["名称"] == d["name"]]
+                if len(row):
+                    r = row.iloc[0]
+                    price = float(r.get("最新价", 0) or 0)
+                    prev = float(r.get("昨收", 0) or 0)
+                    if price > 0 and prev > 0:
+                        return self._build_quote(
+                            d, price, prev,
+                            float(r.get("今开", 0) or price),
+                            float(r.get("最高", 0) or price),
+                            float(r.get("最低", 0) or price),
+                            float(r.get("涨跌幅", 0) or 0),
+                            float(r.get("成交量", 0) or 0),
+                            float(r.get("成交额", 0) or 0) / 1e8,
+                        )
+        except Exception:
+            pass
+        # 2) Fallback: daily K-line (last two closes -> daily change)
+        try:
+            klines = self._akshare_index_daily(d["code"], 5)
+            if klines and len(klines) >= 2:
+                last = klines[-1]["close"]
+                prev = klines[-2]["close"]
+                pct = (last - prev) / prev * 100
+                return self._build_quote(
+                    d, last, prev,
+                    klines[-1].get("open", last),
+                    klines[-1].get("high", last),
+                    klines[-1].get("low", last),
+                    pct,
+                    klines[-1].get("volume", 0),
+                    0.0,
+                )
+        except Exception:
+            pass
+        return None
+
     # ============================================================== public API
+    def _quote_from_sina_row(self, d: dict, row) -> Optional[dict]:
+        """Build a quote dict from a sina A-share spot row; None if unusable."""
+        try:
+            price = float(row.get("最新价", 0) or 0)
+            prev = float(row.get("昨收", 0) or 0)
+            if price <= 0 or prev <= 0:
+                return None
+            return {
+                "code": d["code"],
+                "name": d["name"],
+                "color": d["color"],
+                "price": round(price, 2),
+                "prev_close": round(prev, 2),
+                "open": round(float(row.get("今开", 0) or price), 2),
+                "high": round(float(row.get("最高", 0) or price), 2),
+                "low": round(float(row.get("最低", 0) or price), 2),
+                "change": round(price - prev, 2),
+                "change_pct": round(float(row.get("涨跌幅", 0) or 0), 2),
+                "volume": int(float(row.get("成交量", 0) or 0)),
+                "amount": round(float(row.get("成交额", 0) or 0) / 1e8, 1),
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            }
+        except (ValueError, TypeError):
+            return None
+
     def get_index_quotes(self) -> dict:
         """Return quotes for all configured indices + market breadth."""
         spot = self._akshare_spot() if self._use_akshare else None
         indices = []
         for d in INDEX_DEFS:
-            if spot:
-                row = spot.get(d["sina"].lower())
-                if row is not None:
-                    try:
-                        price = float(row.get("最新价", 0) or 0)
-                        prev = float(row.get("昨收", 0) or 0)
-                        if price > 0 and prev > 0:
-                            indices.append({
-                                "code": d["code"],
-                                "name": d["name"],
-                                "color": d["color"],
-                                "price": round(price, 2),
-                                "prev_close": round(prev, 2),
-                                "open": round(float(row.get("今开", 0) or price), 2),
-                                "high": round(float(row.get("最高", 0) or price), 2),
-                                "low": round(float(row.get("最低", 0) or price), 2),
-                                "change": round(price - prev, 2),
-                                "change_pct": round(float(row.get("涨跌幅", 0) or 0), 2),
-                                "volume": int(float(row.get("成交量", 0) or 0)),
-                                "amount": round(float(row.get("成交额", 0) or 0) / 1e8, 1),
-                                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                            })
-                            continue
-                    except (ValueError, TypeError):
-                        pass
-            # fallback to mock
-            indices.append(self._mock_quote(d["code"]))
+            market = d.get("market", "a")
+            q = None
+            if market == "hk":
+                # 港股（恒生）走独立港股行情源
+                if self._use_akshare:
+                    q = self._akshare_hk_quote(d)
+            else:
+                if spot:
+                    row = spot.get(d["sina"].lower())
+                    if row is not None:
+                        q = self._quote_from_sina_row(d, row)
+            if q is None:
+                q = self._mock_quote(d["code"])
+            q["market"] = market
+            indices.append(q)
 
         return {
             "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),

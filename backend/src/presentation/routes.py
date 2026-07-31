@@ -821,10 +821,10 @@ async def scanner_stream():
 
 @router.get("/api/indices")
 async def get_indices():
-    """Get real-time quotes for major A-share indices + market breadth.
+    """Get real-time quotes for major A-share indices + Hang Seng + market breadth.
 
     交易看板核心接口：覆盖 上证指数 / 深证成指 / 创业板指 / 科创50 /
-    沪深300 / 上证50 / 北证50，并附带涨跌家数（市场宽度）。
+    沪深300 / 上证50 / 北证50 / 恒生指数（港股），并附带涨跌家数（市场宽度）。
     真实数据优先（akshare 可联网时），离线/本地开发自动降级为 mock 生成器。
     """
     provider = get_index_provider()

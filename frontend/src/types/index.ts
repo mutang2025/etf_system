@@ -207,6 +207,7 @@ export interface IndexQuote {
   code: string;
   name: string;
   color: string;
+  market?: 'a' | 'hk';
   price: number;
   prev_close: number;
   open: number;
