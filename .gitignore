@@ -44,3 +44,38 @@ frontend/dist/
 *.temp
 test_output.txt
 create_repo_result.json
+
+# Local agent memory / secrets (contains server IP & deploy env references)
+.workbuddy/
+
+# Runtime logs & artifacts (project root)
+*.log
+backend.log
+backend_verify*.log
+backend_verify_single.log
+deploy_run.log
+deploy_overview_*.md
+frontend_build.log
+frontend_dev_local.log
+frontend_run.log
+frontend/dev_local.log
+backend_verify.log
+
+# Backend runtime scratch
+backend/_seed.py
+backend/_pytest_out.log
+backend/_tmp_score_*.db
+backend/data/*.log
+backend/data/*.py
+backend/data/*.json
+backend/data/*.bak*
+backend/data/backtest_cache/
+
+# Frontend build cache
+frontend/.build_verify/
+frontend/vite.config.ts.timestamp-*.mjs
+
+# Generated analysis / perf reports (keep out of source control)
+IMPROVEMENT_ANALYSIS.md
+other_pages_perf_fix.md
+positions_perf_fix.md
