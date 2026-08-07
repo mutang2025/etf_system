@@ -155,3 +155,48 @@ def test_kline_store_latest_trading_day_weekend():
     finally:
         kc.datetime = saved
         FakeDateTime._now = None
+
+
+def test_latest_trading_day_weekday_before_close():
+    """交易日 16:00 前：当日 bar 未定稿，应回退到前一交易日。"""
+    import src.infrastructure.kline_cache as kc
+
+    # 2026-08-04 是周二，12:00（收盘前）→ 前一交易日 2026-08-03（周一）
+    FakeDateTime._now = _dt(2026, 8, 4, 12, 0)
+    saved = kc.datetime
+    kc.datetime = FakeDateTime
+    try:
+        assert PersistentKlineStore.latest_trading_day() == "2026-08-03"
+    finally:
+        kc.datetime = saved
+        FakeDateTime._now = None
+
+
+def test_latest_trading_day_weekday_after_close():
+    """交易日 16:00 后：当日 bar 已定稿，应返回今天。"""
+    import src.infrastructure.kline_cache as kc
+
+    # 2026-08-04 周二 18:00（收盘后）→ 今天 2026-08-04
+    FakeDateTime._now = _dt(2026, 8, 4, 18, 0)
+    saved = kc.datetime
+    kc.datetime = FakeDateTime
+    try:
+        assert PersistentKlineStore.latest_trading_day() == "2026-08-04"
+    finally:
+        kc.datetime = saved
+        FakeDateTime._now = None
+
+
+def test_latest_trading_day_monday_before_close():
+    """周一 16:00 前：前一交易日应回退到上周五。"""
+    import src.infrastructure.kline_cache as kc
+
+    # 2026-08-03 是周一，10:00（收盘前）→ 上周五 2026-07-31
+    FakeDateTime._now = _dt(2026, 8, 3, 10, 0)
+    saved = kc.datetime
+    kc.datetime = FakeDateTime
+    try:
+        assert PersistentKlineStore.latest_trading_day() == "2026-07-31"
+    finally:
+        kc.datetime = saved
+        FakeDateTime._now = None

@@ -21,6 +21,7 @@ from src.infrastructure.database_repo import DatabaseRepository
 from src.realtime_scanner import get_scanner
 from src.pool_sync_scheduler import get_pool_sync_scheduler
 from src.screening_scheduler import get_screening_scheduler
+from src.infrastructure.market_indices import get_index_provider
 
 app = FastAPI(
     title=settings.APP_NAME,
@@ -107,6 +108,13 @@ async def startup_event():
         except Exception as e:
             print(f"[Startup] Failed to start screening scheduler: {e}")
 
+    # 启动指数行情后台保活（交易看板 / Dashboard 指数区永远命中热缓存，消除冷启动 ~1.5s）
+    try:
+        get_index_provider().start_background_refresh()
+        print("[Startup] Index quotes background refresh started")
+    except Exception as e:
+        print(f"[Startup] Failed to start index refresh: {e}")
+
 
 @app.on_event("shutdown")
 async def shutdown_event():
@@ -124,6 +132,11 @@ async def shutdown_event():
     try:
         get_screening_scheduler().stop()
         print("[Shutdown] Screening scheduler stopped")
+    except Exception:
+        pass
+    try:
+        get_index_provider().stop_background_refresh()
+        print("[Shutdown] Index quotes background refresh stopped")
     except Exception:
         pass
 

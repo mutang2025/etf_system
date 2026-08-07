@@ -33,9 +33,11 @@ import threading
 from dataclasses import asdict
 from datetime import datetime, timedelta
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 from config import settings
 from src.domain.entities import DailyKline
+from src.infrastructure.timeutil import CST
 
 
 class PersistentKlineStore:
@@ -71,14 +73,32 @@ class PersistentKlineStore:
     # ---------- freshness ----------
     @staticmethod
     def latest_trading_day() -> str:
-        """Return the most recent trading day as YYYY-MM-DD.
+        """Return the most recent trading day whose daily bar is *expected to be
+        published* (YYYY-MM-DD, China time / UTC+8).
 
-        Today if it's a weekday; otherwise roll back to last Friday.
+        Daily A-share bars are only finalized after the 15:00 close, and the
+        data source (sina/akshare) frequently lags by a while even then.
+        Treating "today" as the freshness target therefore marks a perfectly
+        good cache entry (still holding yesterday's bar) as *stale on every
+        single call* during trading hours — forcing a full network re-fetch
+        each time (observed: ~1s per ETF, ~3s for the positions page, which
+        calls this path twice). To keep the on-disk / in-process K-line cache
+        sticky we return:
+          * the previous trading day while it is still a trading day and
+            before ~16:00 CST (today's bar not yet reliably published), and
+          * today (or last Friday on weekends) once the session has closed.
+        This still refreshes the cache exactly once per day, right after close.
         """
-        now = datetime.now()
-        if now.weekday() >= 5:  # Sat=5, Sun=6
+        now = datetime.now(CST)
+        if now.weekday() >= 5:  # Sat=5, Sun=6 → roll back to last Friday
             days_back = now.weekday() - 4
             return (now - timedelta(days=days_back)).strftime("%Y-%m-%d")
+        # weekday
+        if now.hour < 16:  # before ~16:00 CST: today's bar not yet finalized
+            d = now.date() - timedelta(days=1)
+            while d.weekday() >= 5:  # skip across weekend if needed
+                d -= timedelta(days=1)
+            return d.strftime("%Y-%m-%d")
         return now.strftime("%Y-%m-%d")
 
     # ---------- public API ----------

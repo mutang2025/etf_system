@@ -125,7 +125,9 @@ def main():
     # ---- Phase F: 启动应用（后台）----
     log("\n[PHASE F] 启动 uvicorn (akshare, 0.0.0.0:8000)")
     # 先杀掉占用 8000 的旧 uvicorn，避免新进程起不来、旧进程继续服务旧 dist
-    ssh_run(c, "pkill -f 'uvicorn main:app' 2>/dev/null; sleep 1; true", timeout=20)
+    # 用 sudo -n pkill -9 确保连 root 拥有的陈旧进程也能杀掉（非 root 身份普通 pkill 杀不掉 -> 端口绑定循环）
+    # 普通 pkill -9 兜底清理本用户进程；sleep 1 让端口释放；true 保证无论结果都继续部署
+    ssh_run(c, "sudo -n pkill -9 -f 'uvicorn main:app' 2>/dev/null; pkill -9 -f 'uvicorn main:app' 2>/dev/null; sleep 1; true", timeout=20)
     runcmd = ("cd %s/backend && nohup env DATA_SOURCE=akshare ~/etf_venv/bin/python -m uvicorn main:app --host 0.0.0.0 --port 8000 > %s/backend_run.log 2>&1 </dev/null &"
               % (APP_DIR, APP_DIR))
     ssh_run(c, runcmd, timeout=20)

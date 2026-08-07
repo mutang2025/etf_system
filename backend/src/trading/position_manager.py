@@ -207,11 +207,27 @@ class PositionManager:
         return result
 
     def get_portfolio_summary(self) -> dict:
-        """Get portfolio overview: total value, total PnL, position count."""
-        positions = self.update_all_positions()
-        total_value = sum(p["current_value"] for p in positions)
-        total_pnl = sum(p["pnl_amount"] for p in positions)
-        total_cost = sum(p["buy_amount"] for p in positions)
+        """Get portfolio overview: total value, total PnL, position count.
+
+        Reads the daemon-maintained PnL columns straight from the DB instead
+        of recomputing live. The realtime scanner refreshes every holding
+        position's PnL into ``positions`` each trading-hour scan round
+        (~every ``SCAN_INTERVAL_SECONDS``), so the stored values are at most
+        ~10s stale during market hours and remain valid after hours. This
+        avoids the old ``update_all_positions()`` path, which recomputed
+        ~10 rolling indicators per holding (cold cache → ~2.2s) AND wrote
+        the DB per position on *every* dashboard/summary request.
+
+        Fallback: if any holding lacks a stored value (brand-new position
+        before the first scan round), refresh once so the summary is never
+        wrong — but the common path is an O(positions) DB read.
+        """
+        positions = self.db.get_holding_positions()
+        if positions and any(p.get("current_value") is None for p in positions):
+            positions = self.update_all_positions()
+        total_value = sum((p.get("current_value") or 0) for p in positions)
+        total_pnl = sum((p.get("pnl_amount") or 0) for p in positions)
+        total_cost = sum((p.get("buy_amount") or 0) for p in positions)
         total_pnl_pct = (total_value / total_cost - 1) * 100 if total_cost > 0 else 0
 
         return {
@@ -223,7 +239,7 @@ class PositionManager:
             "total_capital": settings.TOTAL_CAPITAL,
             "available_capital": round(settings.TOTAL_CAPITAL - total_cost, 2),
             "position_ratio": round(total_cost / settings.TOTAL_CAPITAL * 100, 1) if settings.TOTAL_CAPITAL > 0 else 0,
-            "trend_stocks": sum(1 for p in positions if p["is_trend_stock"]),
+            "trend_stocks": sum(1 for p in positions if p.get("is_trend_stock")),
             "positions": positions,
         }
 

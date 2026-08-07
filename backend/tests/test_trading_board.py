@@ -17,13 +17,13 @@ from src.pool_sync_scheduler import PoolSyncScheduler, CST, get_pool_sync_schedu
 
 # ============================ 交易看板 · 指数源 ============================
 def test_index_quotes_shape():
-    """报价结构：data_source 合法、7 大指数齐全、市场宽度字段完整。"""
+    """报价结构：data_source 合法、8 大指数齐全、市场宽度字段完整。"""
     prov = get_index_provider()
     q = prov.get_index_quotes()
     assert q["data_source"] in ("mock", "akshare")
-    assert len(q["indices"]) == 7
+    assert len(q["indices"]) == 8
     names = {i["name"] for i in q["indices"]}
-    for expected in ("沪深300", "创业板指", "上证指数", "北证50", "科创50", "深证成指", "上证50"):
+    for expected in ("沪深300", "创业板指", "上证指数", "北证50", "科创50", "深证成指", "上证50", "恒生指数"):
         assert expected in names
     assert set(q["breadth"].keys()) >= {"up", "down", "flat", "limit_up", "limit_down"}
 

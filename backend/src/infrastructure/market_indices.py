@@ -17,6 +17,7 @@ mock 生成器特性（只用于离线/开发，不影响生产真实数据路�
 
 import math
 import random
+import threading
 import time
 from datetime import datetime, timedelta
 from typing import Optional
@@ -63,9 +64,26 @@ class IndexDataProvider:
 
         # caches
         self._kline_cache: dict[str, list] = {}
+        # 实时spot（A股指数盘口）：30s TTL，由后台保活线程维持在新鲜窗口内
         self._spot_cache: Optional[dict] = None
         self._spot_updated = 0.0
         self._spot_ttl = 30.0  # seconds — realtime quotes re-fetched at most every 30s
+        # 恒生实时报价：同样 TTL 缓存，避免每次请求联网
+        self._hk_cache: Optional[dict] = None
+        self._hk_updated = 0.0
+        self._hk_ttl = self._spot_ttl
+        # 指数日K（akshare）：历史数据日内稳定，长 TTL 缓存（10min）避免每次切指数联网
+        self._ak_daily_cache: dict[str, tuple[float, list]] = {}
+        self._ak_daily_ttl = 600.0
+        # 后台保活线程句柄
+        self._refresh_thread: Optional[threading.Thread] = None
+        self._refresh_stop: Optional[threading.Event] = None
+        # 异步刷新守卫（避免请求并发时刷爆网络）
+        self._spot_refreshing = False
+        self._spot_refresh_start = 0.0
+        self._hk_refreshing = False
+        self._hk_refresh_start = 0.0
+        self._ak_daily_refresh_last: dict[str, float] = {}
 
     # ============================================================== mock
     def _mock_klines(self, code: str, days: int) -> list:
@@ -163,28 +181,54 @@ class IndexDataProvider:
         }
 
     # ============================================================== akshare
-    def _akshare_spot(self) -> Optional[dict]:
-        """Fetch realtime index spot from sina; returns {sina_symbol_lower: row}."""
+    def _akshare_spot(self, force: bool = False) -> Optional[dict]:
+        """Realtime A-share index spot (sina). Stale-while-revalidate:
+        returns cached data instantly and refreshes in the background when stale,
+        so user requests NEVER block on a cold ~1.3s network fetch."""
         if not self._ak:
             return None
         now = time.time()
         if self._spot_cache is not None and (now - self._spot_updated) < self._spot_ttl:
+            return self._spot_cache  # fresh -> serve immediately
+        if self._spot_cache is not None:
+            self._schedule_spot_refresh()  # stale -> serve instantly, refresh async
             return self._spot_cache
+        return self._fetch_spot()  # first ever -> blocking fetch
+
+    def _fetch_spot(self) -> Optional[dict]:
+        """Blocking fetch + cache write for A-share index spot."""
+        if not self._ak:
+            return None
         try:
             df = self._ak.stock_zh_index_spot_sina()
             if df is None:
-                return None
+                return self._spot_cache
             by_symbol: dict = {}
             for _, row in df.iterrows():
-                sym = str(row.get("代码", "")).strip().lower()
-                by_symbol[sym] = row
+                by_symbol[str(row.get("代码", "")).strip().lower()] = row
             self._spot_cache = by_symbol
-            self._spot_updated = now
+            self._spot_updated = time.time()
             return by_symbol
         except Exception:
-            return None
+            return self._spot_cache
 
-    def _akshare_index_daily(self, code: str, days: int) -> Optional[list]:
+    def _schedule_spot_refresh(self) -> None:
+        now = time.time()
+        if self._spot_refreshing and (now - self._spot_refresh_start) < self._spot_ttl:
+            return  # a refresh is already in flight
+        self._spot_refreshing = True
+        self._spot_refresh_start = now
+
+        def _r() -> None:
+            try:
+                self._fetch_spot()
+            finally:
+                self._spot_refreshing = False
+
+        threading.Thread(target=_r, daemon=True, name="idx-spot-refresh").start()
+
+    def _fetch_ak_daily(self, code: str) -> Optional[list]:
+        """Fetch raw daily K-line for one index (full history, no slicing)."""
         if not self._ak:
             return None
         d = _DEF_BY_CODE.get(code)
@@ -211,7 +255,7 @@ class IndexDataProvider:
                     "close": round(float(row["close"]), 2),
                     "volume": round(float(row.get("volume", 0) or 0), 2),
                 })
-            return klines[-days:] if days < len(klines) else klines
+            return klines
         except Exception:
             return None
 
@@ -266,7 +310,7 @@ class IndexDataProvider:
             pass
         # 2) Fallback: daily K-line (last two closes -> daily change)
         try:
-            klines = self._akshare_index_daily(d["code"], 5)
+            klines = self._fetch_ak_daily(d["code"])
             if klines and len(klines) >= 2:
                 last = klines[-1]["close"]
                 prev = klines[-2]["close"]
@@ -283,6 +327,106 @@ class IndexDataProvider:
         except Exception:
             pass
         return None
+
+    def _cached_hk_quote(self, d: dict) -> Optional[dict]:
+        """Cached Hang Seng realtime quote (stale-while-revalidate)."""
+        if self._ak is None:
+            return None
+        now = time.time()
+        if self._hk_cache is not None and (now - self._hk_updated) < self._hk_ttl:
+            return self._hk_cache.get(d["code"])
+        if self._hk_cache is not None:
+            self._schedule_hk_refresh(d)  # stale -> serve instantly, refresh async
+            return self._hk_cache.get(d["code"])
+        return self._fetch_hk(d)  # first ever -> blocking fetch
+
+    def _fetch_hk(self, d: dict) -> Optional[dict]:
+        q = self._akshare_hk_quote(d)
+        self._hk_cache = {d["code"]: q}
+        self._hk_updated = time.time()
+        return q
+
+    def _schedule_hk_refresh(self, d: dict) -> None:
+        now = time.time()
+        if self._hk_refreshing and (now - self._hk_refresh_start) < self._hk_ttl:
+            return
+        self._hk_refreshing = True
+        self._hk_refresh_start = now
+
+        def _r() -> None:
+            try:
+                self._fetch_hk(d)
+            finally:
+                self._hk_refreshing = False
+
+        threading.Thread(target=_r, daemon=True, name="idx-hk-refresh").start()
+
+    def _get_ak_daily_cached(self, code: str) -> Optional[list]:
+        """Cached akshare daily K-line for one index (stale-while-revalidate)."""
+        now = time.time()
+        cached = self._ak_daily_cache.get(code)
+        if cached is not None and (now - cached[0]) < self._ak_daily_ttl:
+            return cached[1]
+        if cached is not None:
+            self._schedule_ak_daily_refresh(code)  # stale -> serve instantly, refresh async
+            return cached[1]
+        return self._fetch_ak_daily_cached(code)  # first ever -> blocking fetch
+
+    def _fetch_ak_daily_cached(self, code: str) -> Optional[list]:
+        full = self._fetch_ak_daily(code)
+        if full:
+            self._ak_daily_cache[code] = (time.time(), full)
+            return full
+        return None
+
+    def _schedule_ak_daily_refresh(self, code: str) -> None:
+        now = time.time()
+        last = self._ak_daily_refresh_last.get(code, 0.0)
+        if (now - last) < 60.0:  # at most one refresh/min per index
+            return
+        self._ak_daily_refresh_last[code] = now
+
+        def _r() -> None:
+            self._fetch_ak_daily_cached(code)
+
+        threading.Thread(target=_r, daemon=True, name="idx-kline-refresh").start()
+
+    # ----- background warm/refresh (driven from app startup) -----
+    def ensure_warm(self, prefetch_klines: bool = False) -> None:
+        """Synchronously warm spot + (optionally) all index K-line caches.
+        Called at app startup so the first user request is already hot. Never raises."""
+        try:
+            self._fetch_spot()
+            if prefetch_klines:
+                for d in INDEX_DEFS:
+                    try:
+                        self._fetch_ak_daily_cached(d["code"])
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+    def start_background_refresh(self, interval: float = 20.0) -> None:
+        """Start a daemon thread that keeps index caches warm so user requests
+        never block on a cold network fetch (eliminates the ~1.5s first-hit lag)."""
+        if self._refresh_thread is not None and self._refresh_thread.is_alive():
+            return
+        self._refresh_stop = threading.Event()
+
+        def _loop() -> None:
+            self.ensure_warm(prefetch_klines=True)
+            while not self._refresh_stop.wait(interval):
+                self.ensure_warm(prefetch_klines=False)
+
+        t = threading.Thread(target=_loop, daemon=True, name="idx-refresh")
+        t.start()
+        self._refresh_thread = t
+
+    def stop_background_refresh(self) -> None:
+        """Stop the background refresh thread (on app shutdown)."""
+        if self._refresh_stop is not None:
+            self._refresh_stop.set()
+        self._refresh_thread = None
 
     # ============================================================== public API
     def _quote_from_sina_row(self, d: dict, row) -> Optional[dict]:
@@ -318,9 +462,9 @@ class IndexDataProvider:
             market = d.get("market", "a")
             q = None
             if market == "hk":
-                # 港股（恒生）走独立港股行情源
+                # 港股（恒生）走独立港股行情源（带 TTL 缓存，避免每次请求联网）
                 if self._use_akshare:
-                    q = self._akshare_hk_quote(d)
+                    q = self._cached_hk_quote(d)
             else:
                 if spot:
                     row = spot.get(d["sina"].lower())
@@ -343,14 +487,14 @@ class IndexDataProvider:
         """Return K-line history for one index (real if available, else mock)."""
         if code not in _DEF_BY_CODE:
             return {"code": code, "name": "", "klines": []}
-        klines = self._akshare_index_daily(code, days) if self._use_akshare else None
+        klines = self._get_ak_daily_cached(code) if self._use_akshare else None
         if not klines:
             klines = self._mock_klines(code, days)
         return {
             "code": code,
             "name": _DEF_BY_CODE[code]["name"],
             "color": _DEF_BY_CODE[code]["color"],
-            "klines": klines,
+            "klines": klines[-days:] if days < len(klines) else klines,
         }
 
 
