@@ -65,6 +65,14 @@ export const api = {
   skipSignal: (signalId: string) =>
     request<any>(`/signals/${signalId}/skip`, { method: 'POST' }),
 
+  // Auto-Trade (自动交易开关)
+  getAutoTrade: () => request<any>('/auto-trade'),
+  setAutoTrade: (buy: boolean, sell: boolean) =>
+    request<any>('/auto-trade', {
+      method: 'POST',
+      body: JSON.stringify({ buy, sell }),
+    }),
+
   // Positions
   getPositions: (status?: string) =>
     request<any>(`/positions${status ? `?status=${status}` : ''}`),

@@ -660,6 +660,8 @@ class DatabaseRepository:
             ("total_capital", "100000", "screening", "总资金（元）"),
             ("single_position_limit", "0.30", "screening", "单只ETF仓位上限"),
             ("total_position_limit", "0.80", "screening", "总仓位上限"),
+            ("auto_execute_buy", "false", "auto", "买入信号自动确认建仓"),
+            ("auto_execute_sell", "false", "auto", "卖出信号自动执行（清仓/减仓）"),
         ]
         for key, value, group, desc in defaults:
             existing = self.get_param(key)

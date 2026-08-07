@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { RefreshCw, Check, X, Bell } from 'lucide-react'
+import { RefreshCw, Check, X, Bell, Zap } from 'lucide-react'
 import { api } from '../services/api'
 import type { BuySignal } from '../types'
 import { useLiveRefresh, LivePill } from '../services/scannerContext'
@@ -13,6 +13,9 @@ export default function Signals() {
   const [confirmingId, setConfirmingId] = useState<string | null>(null)
   const [buyPrice, setBuyPrice] = useState('')
   const [buyAmount, setBuyAmount] = useState('')
+
+  const [auto, setAuto] = useState<{ buy: boolean; sell: boolean }>({ buy: false, sell: false })
+  const [autoSaving, setAutoSaving] = useState(false)
 
   const loadSignals = async () => {
     setLoading(true)
@@ -30,6 +33,25 @@ export default function Signals() {
 
   useEffect(() => { loadSignals() }, [filterType, filterStatus])
   useLiveRefresh(loadSignals)
+
+  useEffect(() => {
+    api.getAutoTrade().then(r => setAuto({ buy: !!r.buy, sell: !!r.sell })).catch(() => {})
+  }, [])
+
+  const toggleAuto = async (which: 'buy' | 'sell') => {
+    const next = { ...auto }
+    if (which === 'buy') next.buy = !auto.buy
+    else next.sell = !auto.sell
+    setAutoSaving(true)
+    try {
+      const r = await api.setAutoTrade(next.buy, next.sell)
+      setAuto({ buy: !!r.buy, sell: !!r.sell })
+    } catch (e) {
+      alert('切换失败: ' + (e as Error).message)
+    } finally {
+      setAutoSaving(false)
+    }
+  }
 
   const scanBuy = async () => {
     setScanning(true)
@@ -89,6 +111,48 @@ export default function Signals() {
             <RefreshCw size={16} className={`inline mr-1 ${scanning ? 'animate-spin' : ''}`} />
             扫描卖出
           </button>
+        </div>
+      </div>
+
+      {/* 自动交易开关：信号触发即自动成交，无需手动确认 */}
+      <div className="card">
+        <div className="flex items-center justify-between mb-1">
+          <div className="flex items-center gap-2">
+            <Zap size={16} className="text-amber-500" />
+            <h3 className="text-sm font-semibold text-gray-800">自动交易</h3>
+          </div>
+          <span className={`text-xs ${auto.buy || auto.sell ? 'text-green-600' : 'text-gray-400'}`}>
+            {autoSaving ? '保存中…' : (auto.buy || auto.sell ? '运行中' : '已关闭')}
+          </span>
+        </div>
+        <p className="text-xs text-gray-400 mb-2">信号中心出现买卖信号时自动成交，无需手动确认；可随时开关，立即生效。</p>
+        <div className="divide-y divide-gray-100">
+          <div className="flex items-center justify-between gap-3 py-2">
+            <div>
+              <p className="text-sm font-medium text-gray-800">自动买入</p>
+              <p className="text-xs text-gray-400">买入信号出现立即建仓</p>
+            </div>
+            <button
+              onClick={() => toggleAuto('buy')}
+              disabled={autoSaving}
+              className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${auto.buy ? 'bg-green-500' : 'bg-gray-300'} ${autoSaving ? 'opacity-50 cursor-not-allowed' : ''}`}
+            >
+              <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${auto.buy ? 'translate-x-6' : 'translate-x-1'}`} />
+            </button>
+          </div>
+          <div className="flex items-center justify-between gap-3 py-2">
+            <div>
+              <p className="text-sm font-medium text-gray-800">自动卖出</p>
+              <p className="text-xs text-gray-400">卖出信号出现立即平仓 / 减仓</p>
+            </div>
+            <button
+              onClick={() => toggleAuto('sell')}
+              disabled={autoSaving}
+              className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${auto.sell ? 'bg-green-500' : 'bg-gray-300'} ${autoSaving ? 'opacity-50 cursor-not-allowed' : ''}`}
+            >
+              <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${auto.sell ? 'translate-x-6' : 'translate-x-1'}`} />
+            </button>
+          </div>
         </div>
       </div>
 

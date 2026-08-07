@@ -11,6 +11,85 @@ from src.infrastructure.timeutil import now_cst
 from src.trading.buy_signal import BuySignalEngine
 from src.trading.position_manager import PositionManager
 from src.screening.screening_engine import ScreeningEngine
+from src.domain.enums import parse_reduce_ratio
+
+import time
+
+# --------------------------------------------------------------------------
+# 自动交易：信号触发即自动成交（默认关闭，由 AUTO_EXECUTE_BUY/SELL 控制）
+# --------------------------------------------------------------------------
+
+# 同一持仓同一卖出策略的自动执行冷却：守护进程每 SCAN_INTERVAL_SECONDS(默认10s)
+# 一轮扫描，若对「强制减仓」等可重复触发的减仓策略不设冷却，会反复减仓直至清仓。
+_AUTO_SELL_GUARD: dict = {}
+
+
+def _auto_sell_allowed(key: tuple) -> bool:
+    """冷却期内返回 False，避免同一持仓同一策略被守护进程循环重复卖出。"""
+    last = _AUTO_SELL_GUARD.get(key)
+    if last is None:
+        return True
+    return (time.monotonic() - last) >= settings.AUTO_SELL_COOLDOWN_SECONDS
+
+
+def _record_auto_sell(key: tuple) -> None:
+    _AUTO_SELL_GUARD[key] = time.monotonic()
+
+
+def auto_confirm_buy(pos_manager: PositionManager, db, signal, sig_id: str) -> bool:
+    """若启用自动买入，直接确认建仓。复用 confirm_buy 内部的资金上限 / 重复开仓校验；
+    校验失败（资金不足、已持仓等）时返回 False，信号保留为 pending 供手动处理。
+    """
+    if not settings.AUTO_EXECUTE_BUY:
+        return False
+    try:
+        pos_manager.confirm_buy(
+            signal_id=sig_id, etf_code=signal.etf_code, etf_name=signal.etf_name,
+            buy_price=signal.price, buy_amount=signal.suggested_amount,
+            buy_signal_id=sig_id,
+        )
+        db.remove_from_pool(signal.etf_code)
+        return True
+    except ValueError:
+        return False
+
+
+def auto_execute_sell(pos_manager: PositionManager, sig: dict) -> bool:
+    """若启用自动卖出，按信号动作执行清仓 / 减仓，并标记对应卖出信号为 executed。"""
+    if not settings.AUTO_EXECUTE_SELL:
+        return False
+    key = (sig["etf_code"], sig.get("sell_strategy"))
+    if not _auto_sell_allowed(key):
+        return False
+    pos_id = sig.get("position_id")
+    action = sig.get("sell_action")
+    price = sig.get("price")
+    ratio = parse_reduce_ratio(action)
+    try:
+        if ratio is not None:
+            # 减仓动作：部分卖出，持仓保持 holding（reduce_position 内部已标记信号）
+            result = pos_manager.reduce_position(
+                pos_id, price, ratio,
+                sell_strategy=sig.get("sell_strategy") or "auto",
+                etf_code=sig["etf_code"], sell_action=action,
+            )
+        else:
+            # 清仓 / 止损：整仓平仓（close 不会标记信号，需手动标记）
+            result = pos_manager.close_position(
+                pos_id, price, sell_strategy=sig.get("sell_strategy") or "auto",
+            )
+            if result:
+                pos_manager.db.mark_sell_signal_executed(
+                    sig["etf_code"], action,
+                    result.get("sell_pnl_amount", 0),
+                    result.get("sell_pnl_pct", 0),
+                )
+        if not result:
+            return False
+        _record_auto_sell(key)
+        return True
+    except Exception:
+        return False
 
 
 def _buy_signal_to_dict(signal) -> dict:
@@ -73,10 +152,12 @@ def run_buy_scan(screening: ScreeningEngine, buy_engine: BuySignalEngine,
     signals = buy_engine.scan_candidates(scan_codes, factor_map, available)
 
     saved = []
+    auto_buy_executed = []
     for signal in signals:
         signal_dict = _buy_signal_to_dict(signal)
         sig_id = db.save_signal(signal_dict)
-        saved.append({**signal_dict, "signal_id": sig_id})
+        full = {**signal_dict, "signal_id": sig_id}
+        saved.append(full)
 
         # 自动纳入待买入池：记录入池点位 = 信号触发时现价
         rt = buy_engine.mock.get_realtime_quote(signal.etf_code)
@@ -86,7 +167,17 @@ def run_buy_scan(screening: ScreeningEngine, buy_engine: BuySignalEngine,
             now_cst().strftime("%Y-%m-%d %H:%M:%S"),
         )
 
-    return {"scanned": len(scan_codes), "triggered": len(saved), "signals": saved}
+        # 自动买入：信号触发即确认建仓（受 confirm_buy 资金/重复校验保护）
+        if auto_confirm_buy(pos_manager, db, signal, sig_id):
+            full["status"] = "confirmed"
+            auto_buy_executed.append(signal.etf_code)
+
+    return {
+        "scanned": len(scan_codes),
+        "triggered": len(saved),
+        "signals": saved,
+        "auto_buy_executed": auto_buy_executed,
+    }
 
 
 def run_sell_scan(pos_manager: PositionManager) -> dict:
@@ -134,9 +225,17 @@ def run_sell_scan(pos_manager: PositionManager) -> dict:
                 "strategy_type": sig.strategy_type,
             })
 
+    # 自动卖出：持仓卖出信号触发即执行（受 AUTO_EXECUTE_SELL 控制 + 同策略冷却守卫）
+    auto_sell_executed = []
+    for sig in sell_signals:
+        if auto_execute_sell(pos_manager, sig):
+            sig["status"] = "executed"
+            auto_sell_executed.append(sig["signal_id"])
+
     return {
         "scanned": len(positions),
         "triggered": len(sell_signals),
         "signals": sell_signals,
         "pool_sold": pool_sold,
+        "auto_sell_executed": auto_sell_executed,
     }

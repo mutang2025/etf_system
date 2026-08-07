@@ -75,6 +75,10 @@ class SellConfirmRequest(BaseModel):
     sell_strategy: str = "manual"
     sell_action: Optional[str] = None  # 减仓动作（REDUCE_*）；为空则按清仓处理
 
+class AutoTradeRequest(BaseModel):
+    buy: Optional[bool] = None   # 买入信号自动确认建仓
+    sell: Optional[bool] = None  # 卖出信号自动执行（清仓/减仓）
+
 class ParamUpdateRequest(BaseModel):
     key: str
     value: str
@@ -483,6 +487,28 @@ async def scan_sell_signals():
     """Scan all holding positions for sell signal conditions (manual trigger)."""
     pos_manager = get_pos_manager()
     return run_sell_scan(pos_manager)
+
+
+# ============ Auto-Trade (自动交易开关) ============
+
+@router.get("/api/auto-trade")
+async def get_auto_trade():
+    """获取自动交易开关状态（买入/卖出信号是否触发即自动成交）。"""
+    return {"buy": settings.AUTO_EXECUTE_BUY, "sell": settings.AUTO_EXECUTE_SELL}
+
+
+@router.post("/api/auto-trade")
+async def set_auto_trade(body: AutoTradeRequest):
+    """实时切换自动交易开关。写入 strategy_params(auto 组) 并同步进 settings 单例，
+    守护进程下一轮扫描即生效，无需重启。"""
+    db = get_db()
+    if body.buy is not None:
+        db.set_param("auto_execute_buy", "true" if body.buy else "false",
+                     "auto", "买入信号自动确认建仓")
+    if body.sell is not None:
+        db.set_param("auto_execute_sell", "true" if body.sell else "false",
+                     "auto", "卖出信号自动执行（清仓/减仓）")
+    return {"buy": settings.AUTO_EXECUTE_BUY, "sell": settings.AUTO_EXECUTE_SELL}
 
 
 # ============ Pending Buy Pool ============

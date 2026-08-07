@@ -76,6 +76,13 @@ class Settings(BaseSettings):
     SCREENING_ENABLED: bool = True            # 启动时自动拉起选股调度器
     SCREENING_AFTER: str = "15:30"          # 收盘后触发时刻（与池同步一致，等当日数据落地）
 
+    # 自动交易（信号触发即自动成交，无需手动确认；默认关闭，安全优先）
+    # 通过 strategy_params(auto_execute_buy / auto_execute_sell) 持久化，
+    # 可在「信号中心」页面实时开关，set_param 会将值同步进本 settings 单例。
+    AUTO_EXECUTE_BUY: bool = False            # 买入信号自动确认建仓
+    AUTO_EXECUTE_SELL: bool = False           # 卖出信号自动执行（清仓/减仓）
+    AUTO_SELL_COOLDOWN_SECONDS: int = 300     # 同一持仓同一策略的自动卖出最小间隔，防守护进程 10s 循环重复减仓
+
     # Data source
     DATA_SOURCE: str = "akshare"             # "mock" or "akshare"
 
